@@ -70,12 +70,15 @@ class AuthEventService:
             process_id = await self.__get_open_auth_process(user_id)
 
             if process_id is None:
-                logging.info("No Authentication process open for this user.")
-                if str(auth_event) in ("LOGIN"):
-                    logging.info(
-                        "Login will not be validated, exceed authentication time"
-                    )
-                    return
+                # No risk decision opened a process for this user in the last
+                # 5 minutes: the attempt outlasted that window or bypassed the
+                # check. The event is still stored, unlinked, so monitoring
+                # sees it; there is no process to finalize.
+                logging.info(
+                    "No authentication process open for this user; storing the "
+                    "%s event without a risk decision.",
+                    event_type,
+                )
 
             logging.debug(f"Using open auth process {process_id} for user {user_id}")
             auth_event.auth_process = process_id

@@ -196,6 +196,60 @@ async def test_process_auth_event_raise_error_if_auth_process_does_not_exist(moc
     mock_update_auth_process.assert_not_called()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ["LOGIN", "LOGIN_ERROR"])
+async def test_final_event_without_open_process_is_stored_unlinked(
+    mocker, event_type
+):
+    """A final event that arrives after the user's auth process expired, or
+    without one, is still stored, linked to no process, so monitoring sees
+    it. There is no process to finalize."""
+    mock_user_id = str(uuid4())
+    mock_auth_event = AuthEvent(
+        user_id=mock_user_id,
+        event_type=event_type,
+        auth_context_hash="hash",
+        device_info_hash=str(uuid4()),
+        network_location_hash="location_network.hash",
+        event_time=datetime.now(),
+    )
+    payload = _minimal_payload(mock_user_id)
+    payload.event_type = event_type
+
+    service = AuthEventService(payload=payload, realm="test-amfa")
+
+    mocker.patch.object(service, "redis", autospec=True)
+    mocker.patch(
+        "src.data.factory.AuthEventFactory.partial_from_request",
+        return_value=mock_auth_event,
+    )
+    mocker.patch.object(
+        service,
+        "_AuthEventService__get_open_auth_process",
+        return_value=None,
+    )
+    mock_update_redis_cache = mocker.patch.object(
+        service, "_AuthEventService__update_redis_cache", new_callable=AsyncMock
+    )
+    mock_create_auth_event = mocker.patch(
+        "src.data.repository.AuthEventRepository.create_auth_event",
+        new_callable=AsyncMock,
+    )
+    mock_get_auth_process_by_id = mocker.patch(
+        "src.data.repository.AuthProcessRepository.get_auth_process_by_id",
+        new_callable=AsyncMock,
+    )
+
+    await service._AuthEventService__process_auth_event()
+
+    mock_create_auth_event.assert_called_once_with(mock_auth_event)
+    assert mock_auth_event.auth_process is None
+    mock_update_redis_cache.assert_called_once_with(
+        event_type=event_type, user_id=mock_user_id
+    )
+    mock_get_auth_process_by_id.assert_not_called()
+
+
 def _minimal_payload(user_id: str) -> WebhookPayload:
     return WebhookPayload(
         **{

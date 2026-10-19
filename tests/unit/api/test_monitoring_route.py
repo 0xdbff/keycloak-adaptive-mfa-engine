@@ -193,6 +193,33 @@ async def test_the_path_realm_is_what_reaches_the_query(stub_repo):
     assert stub_repo["get_stats"]["realm_id"] == "acme"
 
 
+@pytest.mark.parametrize("call, repo_key", [
+    (lambda r: r.list_events(realm_id="acme", principal=_trusted_reader()), "list_events"),
+    (lambda r: r.get_stats(realm_id="acme", principal=_trusted_reader()), "get_stats"),
+    (lambda r: r.get_geo(realm_id="acme", principal=_trusted_reader()), "get_geo_buckets"),
+    (lambda r: r.get_risky_users(realm_id="acme", principal=_trusted_reader()), "get_risky_users"),
+    (lambda r: r.get_event_counts(realm_id="acme", event_type="LOGIN", principal=_trusted_reader()),
+     "count_by_event_type"),
+])
+@pytest.mark.asyncio(loop_scope="session")
+async def test_trusted_reader_reads_the_path_realm(stub_repo, monkeypatch, call, repo_key):
+    """Every endpoint honours MONITORING_TRUSTED_READERS, and still queries the
+    realm named in the path, never the token's own."""
+    import src.utils.auth.dependency as dep
+    monkeypatch.setattr(
+        dep.environment, "MONITORING_TRUSTED_READERS",
+        frozenset({("https://kc/realms/master", "monitoring-client")}),
+    )
+    await call(MonitoringRoute())
+    assert stub_repo[repo_key]["realm_id"] == "acme"
+
+
+def _trusted_reader():
+    p = _principal("master")
+    p.claims.update({"client_id": "monitoring-client"})
+    return p
+
+
 # --- parameter pass-through ----------------------------------------------
 
 
