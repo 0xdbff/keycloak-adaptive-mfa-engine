@@ -383,6 +383,7 @@ def ensure_login_history(username: str, password: str, uid: str, min_events: int
     have = int(have) if have is not None else 0
     needed = max(0, min_events - have)
     for _ in range(needed):
+        wait_for_decision_slot(uid)  # each login spends one of the user's /decision calls
         res = kc_login(username, password, email_recipient=username)
         if not res["ok"]:
             raise RuntimeError(f"could not build login history: {res['detail']}")
@@ -442,8 +443,14 @@ def db_scalar(sql: str) -> str | None:
 
 
 def redis_set(key: str, value: str = "1", ttl: int = 3600) -> bool:
-    """Seed a key in the engine's redis (used to inject a cached event)."""
-    return _docker("exec", DOCKER_REDIS, "redis-cli", "set", key, value, "EX", str(ttl)) is not None
+    """Seed a key in the engine's redis (used to inject a cached event).
+
+    True only when redis answers OK: redis-cli exits 0 even when redis refuses
+    the command (NOAUTH from a password-protected redis without REDISCLI_AUTH,
+    say), so a successful docker exec alone does not mean the key landed.
+    """
+    out = _docker("exec", DOCKER_REDIS, "redis-cli", "set", key, value, "EX", str(ttl))
+    return out is not None and out.strip() == "OK"
 
 
 def redis_del_pattern(pattern: str) -> None:
@@ -451,6 +458,100 @@ def redis_del_pattern(pattern: str) -> None:
         "exec", DOCKER_REDIS, "sh", "-c",
         f"redis-cli --scan --pattern '{pattern}' | xargs -r redis-cli del",
     )
+
+
+# --- pacing against the engine's rate limits ----------------------------------
+
+
+def _engine_rate_limit() -> tuple[int, float]:
+    """The engine's per-user /decision limit as (max requests, window seconds),
+    read from the engine container, or the engine's defaults if it can't be."""
+    out = _docker("exec", DOCKER_ENGINE, "printenv") or ""
+    env = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    try:
+        return int(env.get("RATE_LIMIT_MAX_REQ", 4)), float(env.get("RATE_LIMIT_TIME_WINDOW", 60))
+    except ValueError:
+        return 4, 60.0
+
+
+_pacing_warned = False
+
+
+def _warn_no_pacing(answer) -> None:
+    """Say once that the suite cannot pace to the rate limit, so later 429s are
+    not a mystery."""
+    global _pacing_warned
+    if _pacing_warned:
+        return
+    _pacing_warned = True
+    if answer:
+        why = " ".join(answer)[:80].rstrip(".") + ". A password-protected redis needs REDISCLI_AUTH set on that container"
+    else:
+        why = "docker exec failed"
+    print(f"  ! cannot read the engine's rate limit from {DOCKER_REDIS} ({why}); "
+          "not pacing, so calls may get HTTP 429.")
+
+
+# The longest wait_for_rate_limit_slot sleeps for one slot, in seconds.
+_MAX_RATE_LIMIT_WAIT = 120
+
+
+def wait_for_rate_limit_slot(bucket: str, identity: str, realm: str = REALM) -> float:
+    """Wait until the engine would accept one more call in ``bucket`` from
+    ``identity``.
+
+    The engine allows RATE_LIMIT_MAX_REQ calls per RATE_LIMIT_TIME_WINDOW
+    seconds for each (bucket, realm, identity): ``decision`` per user, for
+    /decision, and ``config`` per caller, for the settings and scoring writes.
+    The scenarios here log in as one user and change settings as one service
+    account, so by the later ones a window can be full and their own call would
+    get a 429 that says nothing about what they check. This paces the suite to
+    the limit instead of weakening it: it only reads the limiter's sorted set
+    (the ``rl:<bucket>:<realm>:<identity>`` key and scores the engine writes)
+    and sleeps until the oldest call in the window ages out. It never changes
+    the limiter's state. Returns the seconds waited; gives up after one window
+    (at most _MAX_RATE_LIMIT_WAIT) plus a margin and lets the call go ahead, so
+    a stuck or very long limit shows up as the 429 it is rather than a hang.
+    """
+    max_req, window = _engine_rate_limit()
+    key = f"rl:{bucket}:{realm}:{identity}"
+    # A window longer than this is not one a test run can wait out; the call
+    # then goes ahead and its 429 says so.
+    max_wait = min(window, _MAX_RATE_LIMIT_WAIT) + 10
+    waited = 0.0
+    while waited <= max_wait:
+        # The engine scores entries with its own clock, so compare against the
+        # clock of the same Docker host via redis TIME, not this runner's.
+        # Anything unreadable (no docker, a redis that refuses redis-cli)
+        # means no pacing, not a crash: the call goes ahead as before.
+        t = (_docker("exec", DOCKER_REDIS, "redis-cli", "TIME") or "").split()
+        try:
+            now = int(t[0]) + int(t[1]) / 1e6
+        except (IndexError, ValueError):
+            _warn_no_pacing(t)
+            return waited
+        out = _docker("exec", DOCKER_REDIS, "redis-cli", "ZRANGEBYSCORE", key,
+                      f"({now - window}", "+inf", "WITHSCORES")
+        try:
+            scores = [float(v) for v in (out or "").split()[1::2]]
+        except ValueError:
+            _warn_no_pacing(out.split())
+            return waited
+        if out is None:
+            _warn_no_pacing(None)
+            return waited
+        if len(scores) < max_req:
+            return waited
+        pause = min(max(min(scores) + window - now, 0) + 0.5, max_wait - waited + 0.5)
+        time.sleep(pause)
+        waited += pause
+    return waited
+
+
+def wait_for_decision_slot(uid: str, realm: str = REALM) -> float:
+    """wait_for_rate_limit_slot for ``uid``'s /decision calls; every real login
+    spends one."""
+    return wait_for_rate_limit_slot("decision", uid, realm)
 
 
 # --- engine settings (per-realm decision params) -----------------------------
@@ -473,7 +574,11 @@ def put_settings(token: str, params: list) -> requests.Response:
 
     A no-op round-trip (PUT of an unmodified GET) is faithful, so callers can
     flip one field, PUT, then PUT the original back to restore.
+
+    Paced to the engine's per-caller limit on settings writes, so a restore
+    that follows a change is not refused and leaves the realm changed.
     """
+    wait_for_rate_limit_slot("config", ENGINE_CLIENT)
     return requests.put(
         f"{ENGINE_BASE}/{REALM}/settings",
         json=params,

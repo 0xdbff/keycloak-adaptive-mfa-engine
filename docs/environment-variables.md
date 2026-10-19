@@ -19,11 +19,24 @@ That `CREATE EXTENSION` is enough on Docker Postgres and on CloudNativePG when t
 
 ## Redis
 
-| Variable         | Default                | Description                                                    |
-| ---------------- | ---------------------- | -------------------------------------------------------------- |
-| `REDIS_HOST`     | `host.docker.internal` | Redis host                                                     |
-| `REDIS_PORT`     | `6379`                 | Redis port                                                     |
-| `REDIS_PASSWORD` | —                      | Redis password (redis should be configured without a password) |
+Redis holds security state (webhook replay protection, login failure counters,
+rate limits, locks), so a Redis reachable by anything other than the engine
+should require a password, and TLS where the network is not trusted. With none
+of the optional settings below, the engine connects without a password and
+without TLS, as before.
+
+| Variable             | Default   | Description |
+| -------------------- | --------- | ----------- |
+| `REDIS_HOST`         | `redis`   | Redis host. |
+| `REDIS_PORT`         | `6379`    | Redis port. |
+| `REDIS_DB`           | `0`       | Redis database number. |
+| `REDIS_PASSWORD`     | (unset)   | Password for a Redis with `requirepass`, or for the ACL user in `REDIS_USERNAME`. Empty counts as unset. |
+| `REDIS_USERNAME`     | (unset)   | Redis 6+ ACL user. Needs `REDIS_PASSWORD`; without it the password authenticates the default user. |
+| `REDIS_SSL`          | `false`   | Connect over TLS. The server certificate and its hostname are verified, so `REDIS_HOST` must match a name on the certificate. Anything other than true or false stops startup. |
+| `REDIS_SSL_CA_CERTS` | (unset)   | PEM CA bundle for a Redis certificate from a private CA. Unset uses the system trust store. Needs `REDIS_SSL=true`. |
+
+The engine checks Redis at startup and stops with an error naming Redis when it
+cannot connect or the credentials are refused.
 
 ## OIDC / JWT
 
@@ -42,6 +55,7 @@ is fetched from the issuer), and every AMFA realm needs an
 | `OIDC_DISCOVERY_TIMEOUT` | `5`     | Timeout (seconds) for the OIDC discovery / JWKS fetch.                                          |
 | `WEBHOOK_REPLAY_TTL`     | `300`   | Replay-protection window (seconds) for signed webhook `jti`s.                                    |
 | `OIDC_CA_BUNDLE`         | (unset) | Optional PEM CA bundle to trust for the discovery/JWKS fetch (private/internal CA). Unset uses the system trust store. |
+| `MONITORING_TRUSTED_READERS` | (empty) | Comma-separated `{issuer}\|{client_id}` pairs, e.g. `https://sso.example.com/realms/master\|monitoring-service`. Each listed client's **service-account** token may read the read-only `/{realm}/monitoring/*` endpoints of any realm, not only its own. A person signing in through the same client is not trusted, and `/decision`, `/settings` and the webhook still require a token from the realm itself. Empty keeps every monitoring read same-realm. A malformed entry stops startup. Each cross-realm read is logged at INFO. |
 
 ## Risk-Level Decisions
 
