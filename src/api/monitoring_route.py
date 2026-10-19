@@ -24,7 +24,7 @@ from src.data.schema import (
     MonitoringRiskyUser,
     MonitoringStats,
 )
-from src.utils.auth.dependency import enforce_tenant, require_auth
+from src.utils.auth.dependency import enforce_monitoring_read, require_auth
 from src.utils.auth.token_verifier import VerifiedPrincipal
 
 
@@ -91,7 +91,7 @@ class MonitoringRoute:
         already has the total from its first page, so `total` is `-1` on
         the pages where it wasn't recomputed.
         """
-        enforce_tenant(principal, realm_id)
+        enforce_monitoring_read(principal, realm_id)
 
         try:
             rows, total, next_cursor = await MonitoringRepository.list_events(
@@ -120,7 +120,7 @@ class MonitoringRoute:
         principal: VerifiedPrincipal = Depends(require_auth),
     ) -> MonitoringStats:
         """The four KPIs for one realm and window."""
-        enforce_tenant(principal, realm_id)
+        enforce_monitoring_read(principal, realm_id)
         return MonitoringStats(
             **await MonitoringRepository.get_stats(
                 realm_id=realm_id, since=since, until=until
@@ -135,7 +135,7 @@ class MonitoringRoute:
         principal: VerifiedPrincipal = Depends(require_auth),
     ) -> List[MonitoringGeoBucket]:
         """Events grouped into rounded coordinate cells, busiest first."""
-        enforce_tenant(principal, realm_id)
+        enforce_monitoring_read(principal, realm_id)
         buckets = await MonitoringRepository.get_geo_buckets(
             realm_id=realm_id, since=since, until=until
         )
@@ -151,7 +151,7 @@ class MonitoringRoute:
         principal: VerifiedPrincipal = Depends(require_auth),
     ) -> List[MonitoringRiskyUser]:
         """Users whose risky-event count reached `threshold` in the window."""
-        enforce_tenant(principal, realm_id)
+        enforce_monitoring_read(principal, realm_id)
         users = await MonitoringRepository.get_risky_users(
             realm_id=realm_id,
             since=since,
@@ -170,7 +170,7 @@ class MonitoringRoute:
         principal: VerifiedPrincipal = Depends(require_auth),
     ) -> MonitoringEventCount:
         """How many events of one type fall in the window."""
-        enforce_tenant(principal, realm_id)
+        enforce_monitoring_read(principal, realm_id)
         count = await MonitoringRepository.count_by_event_type(
             realm_id=realm_id, event_type=event_type, since=since, until=until
         )

@@ -119,6 +119,8 @@ def sc_login_stepup_and_complete(_name):
     ) if uid else None
 
     ua, screen_res = _novel_context()
+    if uid:
+        e2e.wait_for_decision_slot(uid)
     res = e2e.kc_login(
         e2e.TEST_USER, e2e.TEST_PASS,
         user_agent=ua, screen_res=screen_res, accept_language="",
@@ -168,6 +170,9 @@ def sc_login_stepup_and_complete(_name):
 
 def sc_login_wrong_password(_name):
     """Wrong password is rejected (no authorization code issued)"""
+    uid = e2e.user_id(e2e.TEST_USER, e2e.admin_token())
+    if uid:
+        e2e.wait_for_decision_slot(uid)
     ua, screen_res = _novel_context()
     res = e2e.kc_login(
         e2e.TEST_USER, "definitely-wrong-password",
@@ -277,6 +282,7 @@ def sc_e4_account_change(_name):
             record("E4 account-change", True,
                    f"SKIPPED: could not read engine logs via {e2e.DOCKER_ENGINE}")
             return
+        e2e.wait_for_decision_slot(uid)
         st, risk = _decide(token, "198.51.100.5", uid)
         record("engine scored the login with the account-change present",
                st == 200 and isinstance(risk, int), f"HTTP {st} riskLevel={risk}")
@@ -329,7 +335,15 @@ def sc_disabled_signal_does_not_fire(_name):
         # Same setup as the positive E4 test: seed the (tenant-scoped) account-change event.
         e2e.redis_set(f"d:UPDATE_PASSWORD:{e2e.REALM}:{uid}:{time.time()}")
         base = e2e.engine_log_line_count()
-        _decide(token, "198.51.100.5", uid)
+        e2e.wait_for_decision_slot(uid)
+        st, risk = _decide(token, "198.51.100.5", uid)
+        # "Did not fire" only means something if the engine scored the login:
+        # a rejected call (a 429 from the rate limit, say) never reaches the
+        # signal at all, and used to let this check pass with nothing checked.
+        if st != 200 or not isinstance(risk, int):
+            record("disabled recent_account_change does NOT fire", False,
+                   f"not checked: the decision was not scored (HTTP {st} riskLevel={risk})")
+            return
         time.sleep(3.0)
         newlog = e2e.engine_log_since(base) if base is not None else ""
         fired = ("Account-action analysis" in newlog and "SUSPICIOUS" in newlog) or \

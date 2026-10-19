@@ -60,6 +60,38 @@ OIDC_VERIFY_AUDIENCE = os.getenv("OIDC_VERIFY_AUDIENCE", "true").lower() in ("1"
 # cannot be reshaped into a webhook event, even if it is otherwise signed by a
 # trusted realm.
 WEBHOOK_EXPECTED_AUDIENCE = os.getenv("AMFA_WEBHOOK_AUDIENCE") or "amfa-webhook-event"
+
+
+def _parse_monitoring_readers(value: str) -> frozenset[tuple[str, str]]:
+    """Parse MONITORING_TRUSTED_READERS into (issuer, client_id) pairs.
+
+    Each entry is `{issuer}|{client_id}`, for example
+    `https://sso.example.com/realms/master|monitoring-service`. A malformed entry
+    raises instead of being skipped: a reader silently dropped from the list
+    would only show up later as a monitoring consumer that stopped seeing data.
+    """
+    readers = set()
+    for entry in _csv(value):
+        issuer, sep, client_id = entry.rpartition("|")
+        issuer, client_id = issuer.strip().rstrip("/"), client_id.strip()
+        if not sep or not issuer or not client_id:
+            raise ValueError(
+                f"MONITORING_TRUSTED_READERS entry {entry!r} must be "
+                f"'{{issuer}}|{{client_id}}', e.g. "
+                f"'https://sso.example.com/realms/master|monitoring-service'."
+            )
+        readers.add((issuer, client_id))
+    return frozenset(readers)
+
+
+# Service accounts allowed to read the /monitoring endpoints of ANY realm, not
+# just the realm that issued their token. Empty by default, which keeps every
+# monitoring read same-realm only. Meant for a monitoring platform that holds
+# one confidential client in an admin realm (typically master) and reads every
+# realm of that Keycloak with it. A listed client gains read access to the
+# monitoring data of every realm and to nothing else: /decision, /settings and
+# the webhook still require a token from the realm itself.
+MONITORING_TRUSTED_READERS = _parse_monitoring_readers(os.getenv("MONITORING_TRUSTED_READERS", ""))
 OIDC_CLOCK_SKEW_LEEWAY = int(os.getenv("OIDC_CLOCK_SKEW_LEEWAY", 30))
 # Bounds BOTH how long a signing key is cached (so a rotated/revoked key stops being
 # accepted within this window) AND the stale-key fallback window during a JWKS outage.
@@ -306,9 +338,36 @@ DEVICE_SIGNAL_INCLUDE_BROWSER_VERSION = _env_bool(
     "DEVICE_SIGNAL_INCLUDE_BROWSER_VERSION", False
 )
 
-REDIS_HOST = str(os.getenv(key="REDIS_HOST", default="host.docker.internal"))
-REDIS_PORT = str(os.getenv(key="REDIS_PORT", default="6379"))
-REDIS_PASSWORD = str(os.getenv(key="REDIS_PASSWORD"))
+def _strict_env_bool(key: str, default: bool) -> bool:
+    """Like _env_bool, but an unrecognised value raises instead of reading as False.
+
+    For switches where a typo must not quietly turn a protection off.
+    """
+    raw = os.getenv(key)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{key}={raw!r} is not a boolean; use true or false.")
+
+
+# Redis connection. An empty value counts as unset, so REDIS_PASSWORD= in an
+# .env file means "no password", never an empty or literal "None" password.
+REDIS_HOST = os.getenv("REDIS_HOST") or "redis"
+REDIS_PORT = int(os.getenv("REDIS_PORT") or 6379)
+REDIS_DB = int(os.getenv("REDIS_DB") or 0)
+# Optional Redis 6+ ACL user. Needs REDIS_PASSWORD; without a username the
+# password authenticates the default user (requirepass).
+REDIS_USERNAME = os.getenv("REDIS_USERNAME") or None
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None
+# TLS to Redis, verifying the server certificate and its hostname. The CA
+# bundle is only needed for a private CA; otherwise the system trust store is
+# used.
+REDIS_SSL = _strict_env_bool("REDIS_SSL", False)
+REDIS_SSL_CA_CERTS = os.getenv("REDIS_SSL_CA_CERTS") or None
 
 MIN_AUTH_EVENTS = int(os.getenv(key="MIN_AUTH_EVENTS", default="4"))
 MAX_AUTH_EVENTS = int(os.getenv(key="MAX_AUTH_EVENTS", default="500"))
@@ -616,4 +675,18 @@ def validate() -> None:
             "AMFA cannot start: OIDC_TRUSTED_BASE_URLS is empty. "
             "Set it to a comma-separated list of Keycloak base URLs "
             "(e.g. https://idp.example.com)."
+        )
+    if REDIS_USERNAME and not REDIS_PASSWORD:
+        raise RuntimeError(
+            "AMFA cannot start: REDIS_USERNAME is set but REDIS_PASSWORD is not. "
+            "A Redis ACL user always needs its password."
+        )
+    if REDIS_SSL_CA_CERTS and not REDIS_SSL:
+        raise RuntimeError(
+            "AMFA cannot start: REDIS_SSL_CA_CERTS is set but REDIS_SSL is not true, "
+            "so the connection to Redis would not use TLS at all."
+        )
+    if REDIS_SSL_CA_CERTS and not os.access(REDIS_SSL_CA_CERTS, os.R_OK):
+        raise RuntimeError(
+            f"AMFA cannot start: REDIS_SSL_CA_CERTS={REDIS_SSL_CA_CERTS!r} is not a readable file."
         )

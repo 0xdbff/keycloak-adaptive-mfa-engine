@@ -1,9 +1,11 @@
 import asyncio
+import logging
 from time import time
 
 from fastapi import Request, HTTPException
 
 from src.core.redis import get_redis
+from src.core.config import environment
 from src.core.config.environment import WEBHOOK_REPLAY_TTL, WEBHOOK_EXPECTED_AUDIENCE
 from src.utils.auth.token_verifier import verify_token, AuthError, VerifiedPrincipal
 
@@ -66,6 +68,38 @@ def enforce_webhook_subject(principal: VerifiedPrincipal, claimed_user_id: str |
 def enforce_tenant(principal: VerifiedPrincipal, realm_id: str) -> None:
     if principal.realm != realm_id:
         raise HTTPException(status_code=403, detail="Token realm does not match request realm")
+
+
+def _is_trusted_monitoring_reader(principal: VerifiedPrincipal) -> bool:
+    """True when the token is a listed client's own service-account token.
+
+    `azp` alone is not enough: a person who signs in through the same client
+    gets a token with that `azp` too. Keycloak adds the `client_id` claim only
+    to tokens issued by the client_credentials grant, so requiring it to name
+    the same client limits the trust to the service account itself.
+    """
+    client_id = principal.client_id
+    if not client_id or principal.claims.get("client_id") != client_id:
+        return False
+    return (principal.issuer.rstrip("/"), client_id) in environment.MONITORING_TRUSTED_READERS
+
+
+def enforce_monitoring_read(principal: VerifiedPrincipal, realm_id: str) -> None:
+    """Realm check for the read-only /monitoring endpoints only.
+
+    Same rule as enforce_tenant, except that a service account listed in
+    MONITORING_TRUSTED_READERS may read any realm. Never use this on an
+    endpoint that writes or decides: those stay on enforce_tenant.
+    """
+    if principal.realm == realm_id:
+        return
+    if _is_trusted_monitoring_reader(principal):
+        logging.info(
+            "Cross-realm monitoring read: client %s from %s read realm %s",
+            principal.client_id, principal.issuer, realm_id,
+        )
+        return
+    raise HTTPException(status_code=403, detail="Token realm does not match request realm")
 
 
 def tenant_scoped_id(realm_id: str, user_id) -> str:

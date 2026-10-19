@@ -12,7 +12,7 @@ from src.api.monitoring_route import MonitoringRoute
 
 from src.core.logger import setup_logging
 from src.core.database import get_db
-from src.core.redis import get_redis
+from src.core.redis import check_redis, get_redis
 from src.utils.info_provider import ip_intel
 
 from src.data.model import Base
@@ -64,6 +64,7 @@ async def __init():
         """
         _ = get_db()
         _ = get_redis()
+        await check_redis()
 
         logging.info("Database and redis singletons created!")
 
