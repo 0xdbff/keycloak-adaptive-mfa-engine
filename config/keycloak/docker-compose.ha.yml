@@ -1,0 +1,301 @@
+name: amfa-ha
+
+# High-Availability AMFA stack for testing.
+#
+# Architecture:
+#   nginx        — TLS-terminating load balancer for Keycloak (port 8443) and
+#                  the AMFA engine (port 8095). Gets the DNS alias "keycloak"
+#                  on the internal network so other containers resolve
+#                  https://keycloak:8443 to nginx, not to a single KC node.
+#   keycloak-1   — Imports the test realm on first start; joins the cluster.
+#   keycloak-2   — Joins the cluster; starts after keycloak-1 to avoid a
+#                  simultaneous realm-import race.
+#   adaptive_auth_1 / _2 — Two AMFA engine replicas sharing the same
+#                  PostgreSQL + Redis. adaptive_auth_2 waits for
+#                  adaptive_auth_1 to finish migrations before starting.
+#   postgres     — Shared DB: keycloak schema + adaptive_mfa schema.
+#                  Also used by Keycloak JDBC_PING for cluster node discovery.
+#   redis        — Shared cache + distributed mutex for the AMFA engine.
+#   mailpit      — Local SMTP sink for email OTP (same as single-node).
+#   providers    — One-shot init: verifies/downloads provider JARs.
+#
+# Usage:
+#   cd config/keycloak
+#   cp .env.example .env          # already done if you ran the single-node stack
+#   docker compose -f docker-compose.ha.yml up --build -d
+#
+# Prerequisites are the same as the single-node stack (mkcert certs, /etc/hosts
+# entry for keycloak). See README.md.
+#
+# LOCAL DEVELOPMENT ONLY. This file ships default credentials (admin/admin,
+# password) that are intentionally insecure for convenience. Do not expose
+# this stack outside your machine without replacing every credential in this
+# file and in .env.
+#
+# Access points (identical to single-node so existing docs/realm config apply):
+#   https://keycloak:8443      Keycloak admin console — load balanced
+#   http://localhost:8095      AMFA engine health/API — load balanced
+#   http://localhost:8025      Mailpit web UI
+#   http://localhost:18080     keycloak-1 direct (HTTP, for debugging)
+#   http://localhost:28080     keycloak-2 direct (HTTP, for debugging)
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  amfa_net:
+    driver: bridge
+
+# ── Shared Keycloak node definition ──────────────────────────────────────────
+# Both nodes share every setting except the realm import flag and the
+# direct debug port. The x-keycloak-common anchor is expanded into each
+# keycloak-* service with YAML merge keys (<<: *keycloak-common).
+x-keycloak-common: &keycloak-common
+  image: quay.io/keycloak/keycloak:26.6.3
+  environment:
+    KC_DB: postgres
+    KC_DB_URL: jdbc:postgresql://postgres/keycloak
+    KC_DB_USERNAME: keycloak
+    KC_DB_PASSWORD: password
+    KEYCLOAK_ADMIN: admin
+    KEYCLOAK_ADMIN_PASSWORD: admin
+    # Keycloak runs HTTP only inside the cluster; nginx terminates TLS.
+    KC_HTTP_ENABLED: "true"
+    KC_HOSTNAME_STRICT: "false"
+    # Trust X-Forwarded-* headers set by nginx. Required so that token
+    # issuers and redirect URLs reflect https://keycloak:8443 rather than
+    # the internal http://keycloak-N:8080 address.
+    KC_PROXY_HEADERS: xforwarded
+    # Embedded Infinispan with JDBC_PING cluster discovery.
+    # JDBC_PING writes each node's JGroups address to the shared postgres DB
+    # so nodes find each other without multicast or static IP lists.
+    KC_CACHE: ispn
+    KC_CACHE_STACK: jdbc-ping
+    KC_FEATURES_DISABLED: workflows
+    KC_LOG_LEVEL: "info,org.keycloak.amfa:debug"
+    AMFA_WEBHOOK_AUDIENCE: ${AMFA_WEBHOOK_AUDIENCE:-amfa-webhook-event}
+    # The mkcert root CA — needed so the AMFA SPI's loopback HTTPS calls
+    # (https://keycloak:8443, which goes to nginx) pass TLS verification.
+    KC_TRUSTSTORE_PATHS: /opt/keycloak/certs/rootCA.pem
+  volumes:
+    - ./test-amfa-realm.json:/opt/keycloak/data/import/test-amfa-realm.json:ro
+    - ./keycloak-adaptive-mfa.jar:/opt/keycloak/providers/keycloak-adaptive-mfa.jar:ro
+    - ./keycloak-admin-ui-amfa.jar:/opt/keycloak/providers/keycloak-admin-ui-26.6.3.jar:ro
+    - ./vavr-1.0.1.jar:/opt/keycloak/providers/vavr-1.0.1.jar:ro
+    - ./certs/rootCA.pem:/opt/keycloak/certs/rootCA.pem:ro
+  networks:
+    - amfa_net
+  healthcheck:
+    # Port 8080 is the HTTP management port in start-dev. Check the master
+    # realm endpoint — it is available as soon as Keycloak finishes startup.
+    test:
+      - "CMD-SHELL"
+      - >
+        exec 3<>/dev/tcp/127.0.0.1/8080 2>/dev/null &&
+        printf 'GET /realms/master HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 &&
+        timeout 3 cat <&3 | grep -q '"realm"' || exit 1
+    interval: 15s
+    timeout: 10s
+    retries: 20
+    start_period: 90s
+
+# ── Shared AMFA engine definition ────────────────────────────────────────────
+x-engine-common: &engine-common
+  build:
+    context: ../../
+    dockerfile: Dockerfile
+  env_file:
+    - .env
+  volumes:
+    - ./certs/rootCA.pem:/opt/amfa/certs/rootCA.pem:ro
+  networks:
+    - amfa_net
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "curl", "-sf", "http://localhost:80/health"]
+    interval: 10s
+    timeout: 5s
+    retries: 10
+    start_period: 30s
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: password
+    networks:
+      - amfa_net
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    networks:
+      - amfa_net
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Mailpit ─────────────────────────────────────────────────────────────────
+  mailpit:
+    image: axllent/mailpit:latest
+    networks:
+      - amfa_net
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Provider JARs (one-shot) ─────────────────────────────────────────────────
+  providers:
+    image: curlimages/curl:8.11.1
+    working_dir: /work
+    environment:
+      SPI_BASE_URL: ${SPI_BASE_URL:-https://github.com/DefensePoint/keycloak-adaptive-mfa/releases/download}
+      ADMIN_UI_BASE_URL: ${ADMIN_UI_BASE_URL:-https://github.com/DefensePoint/keycloak-adaptive-mfa-admin-ui/releases/download}
+      MAVEN_BASE_URL: ${MAVEN_BASE_URL:-https://repo1.maven.org/maven2}
+    volumes:
+      - ./:/work
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        fetch() {
+          name="$$1"; sum="$$2"; url="$$3"
+          if [ -f "$$name" ]; then
+            if echo "$$sum  $$name" | sha256sum -c - >/dev/null 2>&1; then
+              echo "$$name present and verified"
+            else
+              echo "NOTE: $$name differs from the pinned release asset; leaving it as is."
+              echo "      Assuming a local build. Delete it to restore the release."
+            fi
+            return 0
+          fi
+          echo "fetching $$name"
+          curl -fsSL -o "$$name" "$$url"
+          echo "$$sum  $$name" | sha256sum -c -
+        }
+        fetch keycloak-adaptive-mfa.jar \
+          fefac397dc45726ea8ab727f33625acba99930ae8c392f2686c1f9561c04d8fd \
+          "$$SPI_BASE_URL/v1.0.1/keycloak-adaptive-mfa.jar"
+        fetch keycloak-admin-ui-amfa.jar \
+          4aecc5de6281feca6c2622a601860550cdaa0446da55732f5e6f2a227363eeef \
+          "$$ADMIN_UI_BASE_URL/v1.0.1/keycloak-admin-ui-amfa.jar"
+        fetch vavr-1.0.1.jar \
+          f9ea1043ad66dbd8e0c4dd7b7a9cdce5bf2d86fab1ce33aace1ad4d56bd1270b \
+          "$$MAVEN_BASE_URL/io/vavr/vavr/1.0.1/vavr-1.0.1.jar"
+    networks:
+      - amfa_net
+
+  # ── Keycloak node 1 — imports realm on first start ─────────────────────────
+  keycloak-1:
+    <<: *keycloak-common
+    command: start-dev --import-realm --cache=ispn --cache-stack=jdbc-ping
+    ports:
+      # Direct HTTP access for debugging only. Do not use for login flows:
+      # the token issuer will be http://localhost:18080 instead of
+      # https://keycloak:8443, which breaks signature verification.
+      - "18080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      providers:
+        condition: service_completed_successfully
+
+  # ── Keycloak node 2 — joins cluster after node 1 is healthy ────────────────
+  keycloak-2:
+    <<: *keycloak-common
+    command: start-dev --cache=ispn --cache-stack=jdbc-ping
+    ports:
+      - "28080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      providers:
+        condition: service_completed_successfully
+      # Wait for node 1 to finish the realm import before joining. Without
+      # this, both nodes race to create the realm and one gets a unique
+      # constraint violation.
+      keycloak-1:
+        condition: service_healthy
+
+  # ── AMFA engine replica 1 — runs Alembic migrations then starts ─────────────
+  adaptive_auth_1:
+    <<: *engine-common
+
+  # ── AMFA engine replica 2 ───────────────────────────────────────────────────
+  # Waits for adaptive_auth_1 to be healthy (migrations done, server up) before
+  # starting. This ensures only one container runs the initial Alembic table
+  # creation, avoiding a simultaneous CREATE TABLE race on a fresh database.
+  adaptive_auth_2:
+    <<: *engine-common
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      adaptive_auth_1:
+        condition: service_healthy
+
+  # ── nginx — load balancer and TLS terminator ────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      # Same host ports as the single-node stack — no URL changes needed.
+      - "8443:8443"   # Keycloak HTTPS (load balanced across keycloak-1 and -2)
+      - "8095:80"     # AMFA engine  (load balanced across adaptive_auth_1 and -2)
+    volumes:
+      - ./nginx-ha.conf:/etc/nginx/nginx.conf:ro
+      - ./certs/keycloak.pem:/etc/nginx/certs/keycloak.pem:ro
+      - ./certs/keycloak-key.pem:/etc/nginx/certs/keycloak-key.pem:ro
+    networks:
+      amfa_net:
+        aliases:
+          # All containers that resolve "keycloak" (the AMFA engine, the SPI
+          # calling back to Keycloak) reach nginx, which load-balances them
+          # across the two Keycloak nodes. This keeps the token issuer URL
+          # (https://keycloak:8443) identical to the single-node stack.
+          - keycloak
+    depends_on:
+      keycloak-1:
+        condition: service_healthy
+      keycloak-2:
+        condition: service_started
+      adaptive_auth_1:
+        condition: service_healthy
+      adaptive_auth_2:
+        condition: service_healthy
