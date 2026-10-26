@@ -158,8 +158,8 @@ This starts five services:
 ### 2. Verify the engine is healthy
 
 ```bash
-curl http://localhost:8095/health 
-# {"status":"ok","db":"ok","redis":"ok"}
+curl http://localhost:8095/health
+# {"status":"ok","db":"ok","redis":"ok","ip_data":{"status":"ok"}}
 ```
 
 ### 3. Verify the realm was imported

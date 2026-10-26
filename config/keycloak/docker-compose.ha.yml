@@ -4,9 +4,11 @@ name: amfa-ha
 #
 # Architecture:
 #   nginx        — TLS-terminating load balancer for Keycloak (port 8443) and
-#                  the AMFA engine (port 8095). Gets the DNS alias "keycloak"
-#                  on the internal network so other containers resolve
-#                  https://keycloak:8443 to nginx, not to a single KC node.
+#                  the AMFA engine (port 8095). Gets DNS aliases "keycloak"
+#                  and "adaptive_auth" on the internal network. "keycloak"
+#                  keeps token issuer URLs identical to the single-node stack;
+#                  "adaptive_auth" is the hostname the Keycloak SPI uses to
+#                  reach the engine (the realm's adaptiveAuthEndpoint).
 #   keycloak-1   — Imports the test realm on first start; joins the cluster.
 #   keycloak-2   — Joins the cluster; starts after keycloak-1 to avoid a
 #                  simultaneous realm-import race.
@@ -89,8 +91,9 @@ x-keycloak-common: &keycloak-common
   networks:
     - amfa_net
   healthcheck:
-    # Port 8080 is the HTTP management port in start-dev. Check the master
-    # realm endpoint — it is available as soon as Keycloak finishes startup.
+    # In start-dev, port 8080 is the regular HTTP port (the management
+    # port is 9000). Check the master realm endpoint — it becomes
+    # available as soon as Keycloak finishes startup.
     test:
       - "CMD-SHELL"
       - >
@@ -290,6 +293,11 @@ services:
           # across the two Keycloak nodes. This keeps the token issuer URL
           # (https://keycloak:8443) identical to the single-node stack.
           - keycloak
+          # Keycloak SPI resolves the engine as "adaptive_auth" (the realm's
+          # adaptiveAuthEndpoint). In the single-node stack that name resolves
+          # directly to the engine container. Here nginx proxies it so both
+          # replicas are reachable under the same hostname.
+          - adaptive_auth
     depends_on:
       keycloak-1:
         condition: service_healthy
