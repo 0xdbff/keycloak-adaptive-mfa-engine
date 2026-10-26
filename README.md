@@ -158,8 +158,8 @@ This starts five services:
 ### 2. Verify the engine is healthy
 
 ```bash
-curl http://localhost:8095/health 
-# {"status":"ok","db":"ok","redis":"ok"}
+curl http://localhost:8095/health
+# {"status":"ok","db":"ok","redis":"ok","ip_data":{"status":"ok"}}
 ```
 
 ### 3. Verify the realm was imported
@@ -186,6 +186,15 @@ The AMFA engine evaluates risk on every login. A new user has no history, so the
 returns Risk 2 or 3 by default and will prompt for a TOTP code or an email OTP.
 
 Email OTP codes land in Mailpit at <http://localhost:8025> — no real mail is sent.
+
+## High-Availability Setup
+
+A multi-node HA configuration is available for testing session replication and
+failover. It runs two Keycloak nodes clustered via Infinispan (JDBC_PING) and
+two AMFA engine replicas behind an nginx load balancer, using the same ports and
+prerequisites as the single-node stack.
+
+See [docs/ha-setup.md](docs/ha-setup.md) for full instructions.
 
 ## Building from Source
 
