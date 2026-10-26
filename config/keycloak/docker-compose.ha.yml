@@ -213,10 +213,10 @@ services:
           echo "$$sum  $$name" | sha256sum -c -
         }
         fetch keycloak-adaptive-mfa.jar \
-          fefac397dc45726ea8ab727f33625acba99930ae8c392f2686c1f9561c04d8fd \
+          e02bed26dc5e65081880e4ab1dbba6fffe0dfd3b9b81db71e657e1cf497a5448 \
           "$$SPI_BASE_URL/v1.0.1/keycloak-adaptive-mfa.jar"
         fetch keycloak-admin-ui-amfa.jar \
-          4aecc5de6281feca6c2622a601860550cdaa0446da55732f5e6f2a227363eeef \
+          6d8389a503d8dc912ccb7b0ed39dba1f3f8add98eed0e2af47c350ac4de5e32a \
           "$$ADMIN_UI_BASE_URL/v1.0.1/keycloak-admin-ui-amfa.jar"
         fetch vavr-1.0.1.jar \
           f9ea1043ad66dbd8e0c4dd7b7a9cdce5bf2d86fab1ce33aace1ad4d56bd1270b \
