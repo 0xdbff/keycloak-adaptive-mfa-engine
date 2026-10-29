@@ -1,19 +1,27 @@
 version: 2
+
+# Dependabot reads this file from the default branch. Promote through the
+# normal release process after review; merging to development alone is not active.
+# Security updates still use the default branch independently of this group.
+multi-ecosystem-groups:
+  dependencies:
+    schedule:
+      interval: "weekly"
+    target-branch: "development"
+    assignees: ["john-defpt"]
+
 updates:
   - package-ecosystem: "pip"
     directory: "/"
-    target-branch: "main"
-    schedule:
-      interval: "weekly"
+    patterns: ["*"]
+    multi-ecosystem-group: "dependencies"
 
   - package-ecosystem: "docker"
     directory: "/"
-    target-branch: "main"
-    schedule:
-      interval: "weekly"
+    patterns: ["*"]
+    multi-ecosystem-group: "dependencies"
 
   - package-ecosystem: "docker"
     directory: "/config/keycloak"
-    target-branch: "main"
-    schedule:
-      interval: "weekly"
+    patterns: ["*"]
+    multi-ecosystem-group: "dependencies"
