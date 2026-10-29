@@ -10,6 +10,10 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        requirements: [requirements.txt, requirements.lock]
     services:
       postgres:
         image: postgres:16-alpine
@@ -46,8 +50,28 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+          cache-dependency-path: ${{ matrix.requirements }}
       - name: Install dependencies
-        run: pip install -r requirements.lock
+        run: pip install -r ${{ matrix.requirements }}
+      - name: Check dependency consistency
+        run: |
+          pip check
+          python - <<'PY'
+          from importlib.metadata import version
+          from pathlib import Path
+          from packaging.requirements import Requirement
+
+          for line in Path("requirements.txt").read_text().splitlines():
+              line = line.split("#", 1)[0].strip()
+              if not line:
+                  continue
+              requirement = Requirement(line)
+              if requirement.marker and not requirement.marker.evaluate():
+                  continue
+              installed = version(requirement.name)
+              if installed not in requirement.specifier:
+                  raise SystemExit(f"{requirement.name}=={installed} does not satisfy {requirement}")
+          PY
       - name: Database migrations
         run: python -m alembic upgrade head
       - name: Migrations match the models
