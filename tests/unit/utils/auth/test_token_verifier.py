@@ -35,6 +35,7 @@ def patch_jwks(monkeypatch, keypair):
     monkeypatch.setattr(tv, "OIDC_CA_BUNDLE", None)
     tv._key_cache.clear()  # isolate stale-cache state between tests
     tv._discovery_failures.clear()  # isolate negative-cache state between tests
+    tv._discovery_unreachable.clear()
     tv._discovery_attempt_times.clear()  # isolate rate-limiter state between tests
     tv._discovery_inflight.clear()  # isolate single-flight state between tests
     monkeypatch.setattr(tv, "_discovery_waiters", 0)
@@ -479,6 +480,101 @@ def test_negative_cache_expires_after_ttl(monkeypatch):
     with pytest.raises(tv.AuthError):
         tv._discover_jwks_uri(ISSUER)
     assert calls["n"] == 2, "expired cache entry must allow a fresh outbound attempt"
+
+
+def _failing_urlopen(monkeypatch, calls, exc):
+    def _raise(*a, **k):
+        calls["n"] += 1
+        raise exc
+    monkeypatch.setattr(tv.urllib.request, "urlopen", _raise)
+
+
+def _http_error(code):
+    return tv.urllib.error.HTTPError(ISSUER, code, "error", {}, None)
+
+
+def _age_failure(seconds):
+    """Pretend the issuer's cached failure happened `seconds` ago."""
+    tv._discovery_failures[ISSUER] = time.time() - seconds
+
+
+@pytest.mark.parametrize("exc", [
+    OSError("connection refused"),
+    TimeoutError("timed out"),
+    tv.urllib.error.URLError(TimeoutError("timed out")),
+    _http_error(503),
+], ids=["refused", "timeout", "urlerror-timeout", "http-503"])
+def test_keycloak_unreachable_is_remembered_only_briefly(monkeypatch, exc):
+    """A failure that says Keycloak could not be reached is not something a
+    client can cause by naming a fake realm, so it uses the short
+    DISCOVERY_UNREACHABLE_CACHE_TTL: the realm recovers within seconds of
+    Keycloak coming back instead of answering 503 for the full failure TTL."""
+    calls = {"n": 0}
+    _failing_urlopen(monkeypatch, calls, exc)
+
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    assert calls["n"] == 1, "a repeat within the short TTL must still be answered locally"
+
+    _age_failure(tv.DISCOVERY_UNREACHABLE_CACHE_TTL + 1)
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    assert calls["n"] == 2, "after the short TTL a fresh attempt must be allowed"
+
+
+@pytest.mark.parametrize("exc", [_http_error(404), _http_error(400), ValueError("not JSON")],
+                         ids=["http-404", "http-400", "bad-document"])
+def test_a_missing_realm_keeps_the_full_failure_ttl(monkeypatch, exc):
+    """A 404 is what Keycloak answers for a realm that does not exist, the
+    case the negative cache protects against, so it keeps the long TTL."""
+    calls = {"n": 0}
+    _failing_urlopen(monkeypatch, calls, exc)
+
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    _age_failure(tv.DISCOVERY_UNREACHABLE_CACHE_TTL + 1)
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    assert calls["n"] == 1, "still within the full failure TTL"
+
+    _age_failure(tv.DISCOVERY_FAILURE_CACHE_TTL + 1)
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    assert calls["n"] == 2
+
+
+def test_a_missing_realm_after_an_outage_gets_the_full_ttl_again(monkeypatch):
+    calls = {"n": 0}
+    _failing_urlopen(monkeypatch, calls, OSError("connection refused"))
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    assert ISSUER in tv._discovery_unreachable
+
+    _age_failure(tv.DISCOVERY_UNREACHABLE_CACHE_TTL + 1)
+    _failing_urlopen(monkeypatch, calls, _http_error(404))
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    assert ISSUER not in tv._discovery_unreachable
+
+    _age_failure(tv.DISCOVERY_UNREACHABLE_CACHE_TTL + 1)
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    assert calls["n"] == 2, "the 404 must be remembered for the full TTL"
+
+
+def test_pruning_forgets_the_unreachable_marker(monkeypatch):
+    now = time.time()
+    tv._discovery_failures["gone"] = now - (tv.DISCOVERY_UNREACHABLE_CACHE_TTL + 1)
+    tv._discovery_unreachable.add("gone")
+    tv._discovery_failures["recent"] = now
+    tv._discovery_unreachable.add("recent")
+
+    tv._prune_discovery_failures(now)
+
+    assert "gone" not in tv._discovery_failures and "gone" not in tv._discovery_unreachable
+    assert "recent" in tv._discovery_failures and "recent" in tv._discovery_unreachable
 
 
 def test_negative_cache_bounded_by_max_size(monkeypatch):

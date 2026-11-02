@@ -112,6 +112,15 @@ OIDC_DISCOVERY_TIMEOUT = int(os.getenv("OIDC_DISCOVERY_TIMEOUT", 5))
 # but long enough that a client repeatedly presenting the same nonexistent
 # issuer can't force a fresh outbound fetch on every request.
 DISCOVERY_FAILURE_CACHE_TTL = int(os.getenv("DISCOVERY_FAILURE_CACHE_TTL", 30))
+# How long a failed lookup is remembered when the failure says Keycloak could
+# not be reached (connection error, timeout, or a 5xx while it starts up)
+# rather than that the realm does not exist. A client cannot cause that kind
+# of failure by naming a fake realm, so it does not need the long TTL above;
+# keeping it short lets every realm recover within seconds once Keycloak is
+# back, instead of answering 503 (and logins falling back to the realm's
+# fallback risk level) for up to DISCOVERY_FAILURE_CACHE_TTL afterwards. The
+# discovery rate limit below still caps the outbound attempts meanwhile.
+DISCOVERY_UNREACHABLE_CACHE_TTL = int(os.getenv("DISCOVERY_UNREACHABLE_CACHE_TTL", 5))
 # Caps how many distinct failed issuers are remembered at once. The realm
 # segment of an issuer is attacker-chosen and otherwise unbounded, so
 # nothing else limits how many distinct cache entries a client could create;

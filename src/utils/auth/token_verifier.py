@@ -4,6 +4,7 @@ import re
 import ssl
 import threading
 import time
+import urllib.error
 import urllib.request
 from collections import deque
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from src.core.config.environment import (
     OIDC_DISCOVERY_TIMEOUT,
     OIDC_CA_BUNDLE,
     DISCOVERY_FAILURE_CACHE_TTL,
+    DISCOVERY_UNREACHABLE_CACHE_TTL,
     DISCOVERY_FAILURE_CACHE_MAX_SIZE,
     DISCOVERY_RATE_LIMIT_MAX_ATTEMPTS,
     DISCOVERY_RATE_LIMIT_WINDOW_SECONDS,
@@ -116,6 +118,10 @@ _jwks_clients: dict[str, PyJWKClient] = {}
 # this concurrently, unlike asyncio coroutines on one loop.
 _discovery_failures_lock = threading.Lock()
 _discovery_failures: dict[str, float] = {}
+# The issuers in _discovery_failures whose last failure was Keycloak being
+# unreachable rather than the realm not existing; they are remembered only
+# for DISCOVERY_UNREACHABLE_CACHE_TTL. Guarded by the same lock.
+_discovery_unreachable: set[str] = set()
 
 # Caps total outbound discovery ATTEMPTS (not failures) across all issuers
 # combined, independent of the cache above: a client cycling through a
@@ -160,10 +166,26 @@ _discovery_inflight: dict[str, _DiscoveryFlight] = {}
 _discovery_waiters = 0
 
 
+def _keycloak_unreachable(exc: Exception) -> bool:
+    """Whether a failed discovery fetch means Keycloak could not be reached
+    (connection error, timeout, a 5xx) rather than that the realm does not
+    exist (a 404 or other 4xx) or that the document was unusable."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code >= 500
+    return isinstance(exc, OSError)  # URLError, TimeoutError, ConnectionError
+
+
+def _failure_ttl(issuer: str) -> int:
+    if issuer in _discovery_unreachable:
+        return DISCOVERY_UNREACHABLE_CACHE_TTL
+    return DISCOVERY_FAILURE_CACHE_TTL
+
+
 def _prune_discovery_failures(now: float) -> None:
-    expired = [iss for iss, ts in _discovery_failures.items() if now - ts > DISCOVERY_FAILURE_CACHE_TTL]
+    expired = [iss for iss, ts in _discovery_failures.items() if now - ts > _failure_ttl(iss)]
     for iss in expired:
         del _discovery_failures[iss]
+        _discovery_unreachable.discard(iss)
     # Still over capacity after expiring stale entries (many distinct fake
     # issuers arriving within one TTL window) -> drop the oldest until back
     # under the cap. Bounds memory even under sustained attack traffic.
@@ -172,6 +194,7 @@ def _prune_discovery_failures(now: float) -> None:
         oldest = sorted(_discovery_failures.items(), key=lambda kv: kv[1])[:overflow]
         for iss, _ in oldest:
             del _discovery_failures[iss]
+            _discovery_unreachable.discard(iss)
 
 
 def _check_discovery_rate_limit(now: float) -> None:
@@ -196,7 +219,7 @@ def _discover_jwks_uri(issuer: str) -> str:
     with _discovery_failures_lock:
         _prune_discovery_failures(now)
         last_failure = _discovery_failures.get(issuer)
-        if last_failure is not None and now - last_failure <= DISCOVERY_FAILURE_CACHE_TTL:
+        if last_failure is not None and now - last_failure <= _failure_ttl(issuer):
             # Answered locally: a recent attempt for this exact issuer
             # already failed, so don't repeat the outbound fetch (or spend a
             # worker thread waiting on it) for every request that keeps
@@ -247,6 +270,10 @@ def _discover_jwks_uri(issuer: str) -> str:
             )
             with _discovery_failures_lock:
                 _discovery_failures[issuer] = now
+                if _keycloak_unreachable(exc):
+                    _discovery_unreachable.add(issuer)
+                else:
+                    _discovery_unreachable.discard(issuer)
             raise AuthError(503, "Unable to fetch OIDC discovery document")
         if doc.get("issuer") != issuer:
             raise AuthError(403, "Discovery document issuer mismatch")
