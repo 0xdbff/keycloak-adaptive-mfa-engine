@@ -5,6 +5,7 @@
 from typing import List
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.core.database import DB
@@ -23,13 +24,18 @@ class LocationNetworkRepository:
     @staticmethod
     async def create_location_network(loc_net: LocationNetwork) -> LocationNetwork:
         """
-        Inserts a new **LocationNetwork** record into the database.
+        Inserts a new **LocationNetwork** record into the database, unless a
+        record with the same hash already exists.
+
+        Two first logins from the same new network can both find no record and
+        insert it at the same moment. The one that loses the race gets the
+        record the other stored, instead of failing on the primary key.
 
         **Parameters**
         - `loc_net`: The **LocationNetwork** instance to persist.
 
         **Returns**
-        - The newly created **LocationNetwork** with refreshed state.
+        - The stored **LocationNetwork**: the new one, or the one that already existed.
         """
         async_session = DB.get_session()
         if not isinstance(async_session, async_sessionmaker):
@@ -37,7 +43,14 @@ class LocationNetworkRepository:
 
         async with async_session() as session:
             session.add(loc_net)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                existing = await session.get(LocationNetwork, loc_net.hash)
+                if existing is None:
+                    raise
+                return existing
             await session.refresh(loc_net)
             return loc_net
 

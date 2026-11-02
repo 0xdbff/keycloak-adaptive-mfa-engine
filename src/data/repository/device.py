@@ -5,6 +5,7 @@
 from typing import List
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.core.database import DB
@@ -23,13 +24,18 @@ class DeviceRepository:
     @staticmethod
     async def create_device(device: Device) -> Device:
         """
-        Inserts a new **Device** record into the database.
+        Inserts a new **Device** record into the database, unless a record with
+        the same hash already exists.
+
+        Two first logins from the same new device can both find no record and
+        insert it at the same moment. The one that loses the race gets the
+        record the other stored, instead of failing on the primary key.
 
         **Parameters**
         - `device`: The **Device** instance to persist.
 
         **Returns**
-        - The newly created **Device** with refreshed state.
+        - The stored **Device**: the new one, or the one that already existed.
         """
         async_session = DB.get_session()
         if not isinstance(async_session, async_sessionmaker):
@@ -37,7 +43,14 @@ class DeviceRepository:
 
         async with async_session() as session:
             session.add(device)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                existing = await session.get(Device, device.hash)
+                if existing is None:
+                    raise
+                return existing
             await session.refresh(device)
             return device
 

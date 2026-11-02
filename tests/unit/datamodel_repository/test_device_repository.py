@@ -1,5 +1,8 @@
+import asyncio
 import pytest
 from datetime import datetime
+
+from sqlalchemy.exc import IntegrityError
 
 from src.data.model.device import Device
 from src.data.repository.device import DeviceRepository
@@ -101,3 +104,49 @@ async def test_delete_device():
 
     deleted = await DeviceRepository.get_device_by_hash(device_to_delete.hash)
     assert deleted is None
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_device_twice_at_once_keeps_one_row(tracked):
+    # Two first logins from the same new device run create_device for the same
+    # hash at the same moment; the second insert must not fail.
+    first = make_device("test-create-device-concurrent")
+    second = make_device("unused")
+    second.hash = first.hash
+
+    created = await asyncio.gather(
+        DeviceRepository.create_device(first),
+        DeviceRepository.create_device(second),
+    )
+    tracked.add(DeviceRepository.delete_device, first)
+
+    assert [c.hash for c in created] == [first.hash, first.hash]
+    found = await DeviceRepository.get_device_by_hash(first.hash)
+    assert found is not None
+    assert found.browser == first.browser
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_device_that_exists_returns_the_stored_row(tracked):
+    stored = make_device("test-create-device-existing")
+    await DeviceRepository.create_device(stored)
+    tracked.add(DeviceRepository.delete_device, stored)
+
+    again = make_device("unused")
+    again.hash = stored.hash
+    again.browser = "Other"
+    created = await DeviceRepository.create_device(again)
+
+    assert created.hash == stored.hash
+    assert created.browser == stored.browser
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_device_still_fails_on_other_errors():
+    # Only an existing hash is tolerated; a row the database refuses for another
+    # reason must still raise.
+    device = make_device("test-create-device-invalid")
+    device.system_language = None
+
+    with pytest.raises(IntegrityError):
+        await DeviceRepository.create_device(device)
