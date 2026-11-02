@@ -137,6 +137,19 @@ DISCOVERY_FAILURE_CACHE_MAX_SIZE = int(os.getenv("DISCOVERY_FAILURE_CACHE_MAX_SI
 # mistake these constants for a global cap when sizing them.
 DISCOVERY_RATE_LIMIT_MAX_ATTEMPTS = int(os.getenv("DISCOVERY_RATE_LIMIT_MAX_ATTEMPTS", 10))
 DISCOVERY_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("DISCOVERY_RATE_LIMIT_WINDOW_SECONDS", 10))
+# How many requests may wait, at once, for another request's in-progress
+# discovery fetch to finish instead of being turned away with a 503. The
+# common case is a handful of legitimate requests for the same realm arriving
+# together (the admin page loads its settings and scoring config in
+# parallel; a burst of logins right after an engine restart), and those
+# should share the one fetch rather than fail. Each waiter holds a worker
+# thread for up to OIDC_DISCOVERY_TIMEOUT, so the cap keeps a flood from
+# parking the whole asyncio.to_thread pool: the default is half that pool
+# (whose own default size is min(32, cpu_count + 4)), and anything past the
+# cap still gets the immediate 503. Per worker PROCESS, like the limits above.
+DISCOVERY_MAX_WAITERS = int(os.getenv(
+    "DISCOVERY_MAX_WAITERS", max(1, min(32, (os.cpu_count() or 1) + 4) // 2)
+))
 
 WEBHOOK_REPLAY_TTL = int(os.getenv("WEBHOOK_REPLAY_TTL", 300))
 # Optional path to a CA bundle (PEM) to trust for the Keycloak discovery/JWKS fetch
