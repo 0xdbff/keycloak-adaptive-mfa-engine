@@ -29,7 +29,7 @@ signals and returns a decision, which keeps it trivial to unit test and reason a
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Dict, Any, List
+from typing import Dict, Any, Iterable, List
 
 
 # Maximum magnitude of a single signal's evidence contribution (log-odds units).
@@ -138,6 +138,7 @@ class LogOddsScorer:
         changed_vars: List[str],
         device_credibility: float,
         net_loc_credibility: float,
+        unavailable_vars: Iterable[str] = (),
     ) -> LogOddsResult:
         """Run the Log-Odds model.
 
@@ -149,14 +150,20 @@ class LogOddsScorer:
                 Device trust score in ``[0, 1]`` (higher is more trusted).
             net_loc_credibility:
                 Network-location trust score in ``[0, 1]``.
+            unavailable_vars:
+                Parameters this login could not be compared on (a missing screen
+                resolution, for example). They add neither risk nor trust.
 
         Returns:
             LogOddsResult: the risk level plus the probability and evidence breakdown.
         """
         changed = set(changed_vars or [])
+        unavailable = set(unavailable_vars or ())
         contributions: Dict[str, float] = {}
 
         for param in self._enabled_params():
+            if param in unavailable:
+                continue
             factor = self._weight_factor(param)
             if param in changed:
                 contributions[param] = MAX_RISK_EVIDENCE * factor
