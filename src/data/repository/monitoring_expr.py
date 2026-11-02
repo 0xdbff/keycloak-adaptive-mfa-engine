@@ -9,18 +9,23 @@ The realm filter reads the `realm_id` column first and falls back to the same
 snapshot. Migrations f1a2b3c4d5e6 and a2b3c4d5e6f7 left pre-existing rows NULL.
 """
 
-from sqlalchemy import Boolean, Float, Numeric, and_, case, cast, func, literal, or_
+from sqlalchemy import Float, Numeric, and_, case, cast, func, literal, or_
 
+from src.core.sql_dialect import EmptyAsNull, JsonBool, JsonText, NullIfEq
 from src.data.model import AuthContext, AuthEvent, AuthProcess
 
 
 def _json_text(key: str):
     """Extract a JSON key as text, treating an empty string as NULL.
 
-    The column is `JSON`, not `JSONB`, so `as_string()` emits `->>`. A `->`
-    extraction keeps the JSON quoting and never matches a plain string.
+    Compiles to Postgres `->>` and to SQL Server `JSON_VALUE`. Empty string
+    becomes NULL on both.
     """
-    return func.nullif(AuthProcess.auth_context_json[key].as_string(), "")
+    return func.nullif(JsonText(AuthProcess.auth_context_json, key), "")
+
+
+def _json_bool(key: str):
+    return JsonBool(AuthProcess.auth_context_json, key)
 
 
 # --- realm / tenant -------------------------------------------------------
@@ -47,9 +52,9 @@ def realm_filter(realm_id: str):
     two sources never disagree for rows that have both.
     """
     return or_(
-        func.nullif(AuthEvent.realm_id, "") == realm_id,
+        NullIfEq(AuthEvent.realm_id, realm_id),
         and_(
-            func.nullif(AuthEvent.realm_id, "").is_(None),
+            EmptyAsNull(AuthEvent.realm_id),
             realm_id_expr == realm_id,
         ),
     )
@@ -65,7 +70,7 @@ country_expr = func.coalesce(
 lat_expr = func.coalesce(AuthContext.lat, cast(_json_text("lat"), Float))
 long_expr = func.coalesce(AuthContext.long, cast(_json_text("long"), Float))
 is_vpn_expr = func.coalesce(
-    AuthContext.is_vpn, cast(_json_text("is_vpn"), Boolean), literal(False)
+    AuthContext.is_vpn, _json_bool("is_vpn"), literal(False)
 )
 
 # AuthContext has no city column, so city has no table-first fallback to apply.
@@ -103,9 +108,14 @@ def has_usable_geo():
 def geo_cell(expr):
     """Round a coordinate to its map cell.
 
-    Rounds through `numeric`: PostgreSQL has no `round(double precision, int)`.
+    Casting to `numeric` at the cell's own scale is the rounding, and it works on
+    both dialects: PostgreSQL has no `round(double precision, int)`. A second
+    rounding step would move 38.74996 to 38.75 and then to the wrong cell, 38.8.
+    The scale must be explicit, because SQL Server's bare `NUMERIC` is an integer.
+    The 8 integer digits are headroom: a bad stored value must not overflow the
+    cast and fail the whole query.
     """
-    return cast(func.round(cast(expr, Numeric), GEO_PRECISION), Float)
+    return cast(cast(expr, Numeric(8 + GEO_PRECISION, GEO_PRECISION)), Float)
 
 
 # --- risk -----------------------------------------------------------------

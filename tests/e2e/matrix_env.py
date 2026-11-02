@@ -45,6 +45,7 @@ from tests.e2e.matrix_lib import (
     KC_BASE,
     MAILPIT,
     admin_token,
+    IS_MSSQL,
     psql,
 )
 
@@ -228,7 +229,7 @@ def preflight() -> dict:
     # parameters of its own falls back to it and a missing fallback raises mid-login.
     default_params = psql(
         "select count(*) from decision_params_config "
-        "where realm_id='default' and group_id='default' and is_active;"
+        f"where realm_id='default' and group_id='default' and is_active = {1 if IS_MSSQL else 'true'};"
     )
     observed["default_params_rows"] = default_params
     if default_params.strip() not in ("1",):

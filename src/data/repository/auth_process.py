@@ -7,7 +7,6 @@ from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
-from sqlalchemy.dialects.postgresql import UUID
 import uuid
 
 from src.core.database import DB
@@ -158,7 +157,7 @@ class AuthProcessRepository:
 
     @staticmethod
     async def get_auth_context_json_for_user(
-        user_id: UUID,
+        user_id: uuid.UUID,
         final_status: str,
         limit: int | None = None,
         date_limit: datetime | None = None,
@@ -198,7 +197,7 @@ class AuthProcessRepository:
 
     @staticmethod
     async def get_complete_records_for_user(
-        user_id: UUID | uuid.UUID,
+        user_id: uuid.UUID,
         realm_id: str,
         final_status: str | None = None,
         limit: int | None = None,

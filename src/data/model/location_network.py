@@ -12,6 +12,7 @@ from sqlalchemy.orm import validates
 
 from .base import Base
 
+from src.core.sql_dialect import hashed_str, text_str
 from src.utils.validation.regex import SHA256_REGEX_HEX
 
 
@@ -41,14 +42,14 @@ class LocationNetwork(Base):
     __tablename__ = "location_network"
 
     hash = Column(
-        String(64),
+        hashed_str(64),
         primary_key=True,
         doc="Primary key to uniquely identify the network record.",
     )
     geolocation_cluster_label = Column(
         Integer, doc="Numeric label for geolocation grouping."
     )
-    country = Column(String(32), doc="Numeric code for the country.")
+    country = Column(text_str(32), doc="Numeric code for the country.")
     ip_address = Column(
         String(45), nullable=False, doc="IP address from which the request originated."
     )

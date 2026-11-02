@@ -5,10 +5,18 @@ The **DecisionParamsConfig** model holds configuration parameters used for
 pre-authentication risk decision.
 """
 
-from sqlalchemy import Column, String, Boolean, JSON, DateTime, text
-from sqlalchemy.dialects.postgresql import UUID
+import uuid
+
+from sqlalchemy import Column, Boolean, JSON, DateTime, Uuid
 from sqlalchemy.sql import func
 from sqlalchemy.orm import validates
+
+from src.core.sql_dialect import (
+    boolean_false_server_default,
+    hashed_str,
+    ident_str,
+    uuid_server_default,
+)
 
 from .base import Base
 
@@ -45,28 +53,29 @@ class DecisionParamsConfig(Base):
     __tablename__ = "decision_params_config"
 
     id = Column(
-        UUID(as_uuid=True),
+        Uuid(as_uuid=True),
         primary_key=True,
-        server_default=text("uuid_generate_v4()"),
+        default=uuid.uuid4,
+        server_default=uuid_server_default(),
         doc="Primary key: auto-generated UUID (v4).",
     )
     realm_id = Column(
-        String(255), nullable=False, doc="Identifier for a specific realm context."
+        ident_str(255), nullable=False, doc="Identifier for a specific realm context."
     )
     group_id = Column(
-        String(255),
+        ident_str(255),
         nullable=False,
         doc="Identifier for a group or category within the realm.",
     )
     is_active = Column(
         Boolean,
-        server_default="false",
+        server_default=boolean_false_server_default(),
         default=False,
         doc="Indicates if the configuration is currently active.",
     )
     parameters = Column(JSON, doc="JSON object storing parameter details or rules.")
     parameters_hash = Column(
-        String(64), nullable=False, doc="Parameters JSON hash to identify versions"
+        hashed_str(64), nullable=False, doc="Parameters JSON hash to identify versions"
     )
     scoring_config = Column(
         JSON,

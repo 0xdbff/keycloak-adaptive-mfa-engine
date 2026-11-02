@@ -3,17 +3,53 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from src.core.sql_dialect import (
+    MSSQL_MANAGED_IDENTITY,
+    SUPPORTED_DB_TYPES,
+    build_database_urls,
+    db_type as _db_type,
+)
+
 POSTGRES_USER = os.getenv("POSTGRES_USER")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
 POSTGRES_HOST = os.getenv("POSTGRES_HOST")
 POSTGRES_PORT = os.getenv("POSTGRES_PORT")
 DATABASE = os.getenv("POSTGRES_DB")
 
+# postgresql (default) or mssql. POSTGRES_* still name the connection for both;
+# they are the existing env contract. mssql uses the same host/user/password/db
+# with port 1433 and ODBC Driver 18 unless overridden below.
+DB_TYPE = _db_type()
+MSSQL_ODBC_DRIVER = (
+    os.getenv("MSSQL_ODBC_DRIVER") or "ODBC Driver 18 for SQL Server"
+)
+
+
+def _env_flag(key: str, default: bool) -> bool:
+    raw = os.getenv(key)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+MSSQL_ENCRYPT = _env_flag("MSSQL_ENCRYPT", True)
+MSSQL_TRUST_SERVER_CERTIFICATE = _env_flag(
+    "MSSQL_TRUST_SERVER_CERTIFICATE", False
+)
+MSSQL_POOL_SIZE = int(os.getenv("MSSQL_POOL_SIZE") or 2)
+MSSQL_MAX_OVERFLOW = int(os.getenv("MSSQL_MAX_OVERFLOW") or 2)
+# An ODBC `Authentication` value. Empty means SQL login with POSTGRES_USER and
+# POSTGRES_PASSWORD. ActiveDirectoryMsi is a managed identity and takes no
+# password; POSTGRES_USER then identifies a user-assigned identity.
+MSSQL_AUTHENTICATION = (os.getenv("MSSQL_AUTHENTICATION") or "").strip()
+MSSQL_PASSWORDLESS = DB_TYPE == "mssql" and MSSQL_AUTHENTICATION == MSSQL_MANAGED_IDENTITY
+
 REJECTED_AUTH_RISK_LEVEL = str(os.getenv(key="REJECTED_AUTH_RISK_LEVEL", default=4))
 
-SCHEMA = os.getenv("POSTGRES_SCHEMA")
-
 WORKERS = int(os.getenv("WORKERS", 4))
+
+# How long /health waits for the database and for Redis before reporting them down.
+HEALTH_CHECK_TIMEOUT = float(os.getenv("HEALTH_CHECK_TIMEOUT") or 3)
 
 # The listen port. Stays 80 by default: Docker sets
 # net.ipv4.ip_unprivileged_port_start=0 inside containers, so the unprivileged
@@ -29,6 +65,7 @@ database_parameters = {
     "port": POSTGRES_PORT,
     "database": DATABASE,
 }
+_optional_parameters = ("user", "password") if MSSQL_PASSWORDLESS else ()
 
 # Logging: LOG_LEVEL accepts a name ("INFO", "DEBUG") or a number ("20"); the
 # app logs to stdout/stderr by default. Set LOG_DIR to a writable directory to
@@ -36,9 +73,28 @@ database_parameters = {
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_DIR = os.getenv("LOG_DIR")
 
-DATABASE_URL = "postgresql://{user}:{password}@{host}:{port}/{database}".format(
-    **database_parameters
-)
+# Built even when some fields are None so unit tests can import this module
+# without a live database. validate() refuses to start the engine on blanks.
+if all(v for k, v in database_parameters.items() if k not in _optional_parameters):
+    DATABASE_URL, ASYNC_DATABASE_URL = build_database_urls(
+        DB_TYPE,
+        POSTGRES_USER,
+        POSTGRES_PASSWORD,
+        POSTGRES_HOST,
+        POSTGRES_PORT,
+        DATABASE,
+        odbc_driver=MSSQL_ODBC_DRIVER,
+        encrypt=MSSQL_ENCRYPT,
+        trust_server_certificate=MSSQL_TRUST_SERVER_CERTIFICATE,
+        authentication=MSSQL_AUTHENTICATION,
+    )
+else:
+    DATABASE_URL = "postgresql://{user}:{password}@{host}:{port}/{database}".format(
+        **database_parameters
+    )
+    ASYNC_DATABASE_URL = DATABASE_URL.replace(
+        "postgresql://", "postgresql+asyncpg://", 1
+    )
 
 def _csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
@@ -682,11 +738,16 @@ ALLOWED_BLACK_WHITE_LIST_PARAMS = (
 
 
 def validate() -> None:
+    if DB_TYPE not in SUPPORTED_DB_TYPES:
+        raise RuntimeError(
+            f"AMFA cannot start: DB_TYPE={DB_TYPE!r} is not supported. "
+            f"Use one of: {', '.join(SUPPORTED_DB_TYPES)}."
+        )
     missing = [
         name
         for name, value in (
-            ("POSTGRES_USER", POSTGRES_USER),
-            ("POSTGRES_PASSWORD", POSTGRES_PASSWORD),
+            ("POSTGRES_USER", POSTGRES_USER or MSSQL_PASSWORDLESS),
+            ("POSTGRES_PASSWORD", POSTGRES_PASSWORD or MSSQL_PASSWORDLESS),
             ("POSTGRES_HOST", POSTGRES_HOST),
             ("POSTGRES_PORT", POSTGRES_PORT),
             ("POSTGRES_DB", DATABASE),
@@ -695,9 +756,15 @@ def validate() -> None:
     ]
     if missing:
         raise RuntimeError(
-            f"AMFA cannot start: required Postgres env vars are unset: {', '.join(missing)}. "
+            f"AMFA cannot start: required database env vars are unset: {', '.join(missing)}. "
+            "These names are POSTGRES_* for both PostgreSQL and Azure SQL (DB_TYPE=mssql). "
             "Unset values format into the connection string literally, so the failure looks "
             "like a connection error to a host named 'None'."
+        )
+    if HEALTH_CHECK_TIMEOUT <= 0:
+        raise RuntimeError(
+            f"AMFA cannot start: HEALTH_CHECK_TIMEOUT={HEALTH_CHECK_TIMEOUT} must be "
+            "positive. /health would report every dependency as down."
         )
     if not OIDC_TRUSTED_BASE_URLS:
         raise RuntimeError(

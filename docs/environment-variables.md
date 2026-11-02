@@ -2,20 +2,67 @@
 
 All variables are read by `src/core/config/environment.py`. Variables without a default are required.
 
-## PostgreSQL
+## Database
 
-| Variable            | Default | Description       |
+`DB_TYPE` selects the dialect. PostgreSQL is the default and is unchanged. Azure SQL is the same engine process with `DB_TYPE=mssql`. There is no Postgres-only fork.
+
+| Variable | Default | Description |
 | ------------------- | ------- | ----------------- |
-| `POSTGRES_USER`     | —       | Database username |
-| `POSTGRES_PASSWORD` | —       | Database password |
-| `POSTGRES_HOST`     | —       | Database host     |
-| `POSTGRES_PORT`     | —       | Database port     |
-| `POSTGRES_DB`       | —       | Database name     |
-| `POSTGRES_SCHEMA`   | —       | Database schema   |
+| `DB_TYPE` | `postgresql` | `postgresql` or `mssql` |
+| `POSTGRES_USER` | — | Database username (name is historical; used for both dialects). With a user-assigned managed identity, its id (see below). |
+| `POSTGRES_PASSWORD` | — | Database password. Not used with `MSSQL_AUTHENTICATION=ActiveDirectoryMsi`. |
+| `POSTGRES_HOST` | — | Database host |
+| `POSTGRES_PORT` | — | Database port (`5432` for Postgres, `1433` for Azure SQL) |
+| `POSTGRES_DB` | — | Database name |
+| `MSSQL_ODBC_DRIVER` | `ODBC Driver 18 for SQL Server` | ODBC driver name when `DB_TYPE=mssql` |
+| `MSSQL_ENCRYPT` | `true` | TLS to SQL Server. Leave on for Azure SQL. |
+| `MSSQL_TRUST_SERVER_CERTIFICATE` | `false` | Trust the SQL Server certificate without chain validation. Off for Azure SQL public endpoints. |
+| `MSSQL_POOL_SIZE` | `2` | Connections each worker keeps open on SQL Server |
+| `MSSQL_MAX_OVERFLOW` | `2` | Extra connections each worker can open under load on SQL Server |
+| `MSSQL_AUTHENTICATION` | — | ODBC `Authentication` value. `ActiveDirectoryMsi` signs in with a managed identity. Empty means a SQL login. |
 
-The engine's tables call `uuid_generate_v4()`, so the database needs the `uuid-ossp` extension. The compose stack creates it from `config/keycloak/init-db.sql`, which Postgres runs only when it initialises an empty data directory, so it does not help a database that already exists. The base Alembic migration also runs `CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`.
+On PostgreSQL the engine's tables call `uuid_generate_v4()`, so the database needs the `uuid-ossp` extension. The compose stack creates it from `config/keycloak/init-db.sql`, which Postgres runs only when it initialises an empty data directory, so it does not help a database that already exists. The base Alembic migration also runs `CREATE EXTENSION IF NOT EXISTS "uuid-ossp"` on Postgres.
 
 That `CREATE EXTENSION` is enough on Docker Postgres and on CloudNativePG when the Database object lists `uuid-ossp`. `uuid-ossp` is a trusted extension, so the role running the migration needs `CREATE` on the database rather than superuser, which is why this works where the application user is not a superuser. Some managed Postgres products (Azure Database for PostgreSQL Flexible Server via `azure.extensions`) reject `CREATE EXTENSION` until the extension is allow-listed at the server. If you are not using the compose stack, confirm that allow-list before the first migration.
+
+On Azure SQL the same migration uses `NEWID()` and `TODATETIMEOFFSET(SYSUTCDATETIME(), 0)`, skips `uuid-ossp`, and stores JSON in `nvarchar`. Create an **empty** database (not a Keycloak database) on the SQL server and point `POSTGRES_*` at it with `DB_TYPE=mssql`.
+
+### Azure SQL / SQL Server setup
+
+Create the database with a case-sensitive UTF-8 collation:
+
+```sql
+CREATE DATABASE amfa COLLATE Latin1_General_100_CS_AS_SC_UTF8;
+```
+
+Realm isolation does not depend on this. The columns that hold realms, groups, and hashes set their own collation, and the test suite runs on both this collation and the server default. The database collation still decides how `event_type`, `final_status`, `ip_address`, and `screen_resolution` compare, and those are case-insensitive on Azure SQL's default.
+
+The migration creates tables, indexes, and primary keys. The login used for `alembic upgrade` needs `db_ddladmin`, `db_datareader`, and `db_datawriter` on this database (`db_owner` also works). `db_ddladmin` alone is not enough: Alembic records the applied revision by inserting a row, and the whole migration rolls back when it cannot. The running engine needs only `db_datareader` and `db_datawriter` once the schema exists. The container runs `alembic upgrade head` at every start, which is a no-op for that login when the schema is current.
+
+Text columns that hold realm names, group names, country names, and event details are `NVARCHAR`. Hash columns are `VARCHAR` with a binary collation so an uppercase hash does not match a lowercase one.
+
+Each worker opens at most `MSSQL_POOL_SIZE + MSSQL_MAX_OVERFLOW` connections, so the default `WORKERS=4` uses at most 16. Azure SQL limits concurrent workers and logins by tier: Basic allows 30, S0 60, S1 90, and S2 120. Stay below your tier's limit. A request that cannot get a connection waits up to 30 seconds and then fails, so raise both settings on a larger tier if logins queue under load. Basic and S0 are for evaluation: Microsoft recommends S3 or greater for resource-intensive work.
+
+The engine signs in with a SQL login (`POSTGRES_USER` / `POSTGRES_PASSWORD`) by default. To use a managed identity, set `MSSQL_AUTHENTICATION=ActiveDirectoryMsi` and leave `POSTGRES_PASSWORD` empty. For a user-assigned identity, set `POSTGRES_USER` to its client id on Azure App Service or Azure Container Instances, and to its object id elsewhere, as Microsoft's ODBC driver documents. Create a database user for the identity first, with `CREATE USER [name] FROM EXTERNAL PROVIDER`.
+
+On `auth_event` and `auth_process`, the primary key is nonclustered and the clustered key is the event time. Random UUIDs as the clustered key leave the table fragmented as it grows.
+
+The primary key and `ix_auth_user_event_time_desc` have random leading keys, so they fragment as rows arrive, and Azure SQL does not defragment them for you. They reach about 99% fragmentation and 65 to 75% page fullness at 100,000 events. Listing events is not affected much, because it uses the realm index, which stays below 2%. The cost is wasted space and slower lookups by user. Schedule this, for example weekly, with a login that has `db_ddladmin`:
+
+```sql
+ALTER INDEX ALL ON auth_event REORGANIZE;
+ALTER INDEX ALL ON auth_process REORGANIZE;
+```
+
+`REORGANIZE` is an online operation. On `auth_event` at 100,000 rows it took about 4 seconds in testing and left every index below 2% fragmented. The engine's runtime login cannot run it.
+
+Leave `MSSQL_ENCRYPT=true` and `MSSQL_TRUST_SERVER_CERTIFICATE=false` for Azure SQL public endpoints. Set `MSSQL_TRUST_SERVER_CERTIFICATE=true` only for a local SQL Server container whose certificate is self-signed.
+
+The image includes Microsoft's ODBC Driver 18 for SQL Server. Operators redistributing the image should review Microsoft's license for that driver.
+
+The Keycloak Monitoring Tool (KMT) must read through the engine's `/monitoring` API. It must not query the engine's tables directly: the schema is not a public contract, and on SQL Server the types and collations differ from PostgreSQL.
+
+The end-to-end suite runs against either database. See `tests/e2e/README.md`.
 
 ## Redis
 
@@ -389,6 +436,7 @@ list, which is off by default because its redistribution grant is not establishe
 | Variable    | Default | Description                                        |
 | ----------- | ------- | -------------------------------------------------- |
 | `WORKERS`   | `4`     | Number of Uvicorn worker processes                 |
+| `HEALTH_CHECK_TIMEOUT` | `3` | Seconds `/health` and `/health/detail` wait for the database and for Redis before reporting them as `error` and answering 503. Keep it below your probe's own timeout. Must be positive. Each check opens its own database and Redis connections, not the shared pools, and calls within a second share one check. |
 | `ENGINE_PORT` | `80`  | Port the engine listens on inside its container. The image runs as a non-root user; Docker lets it bind 80, but runtimes that keep the 1024 floor (some Kubernetes and podman setups) need a port above 1024. Keycloak calls the engine at each realm's AMFA Engine Endpoint, so that endpoint must include the new port too, for example `http://adaptive_auth:8081` |
 | `LOG_LEVEL` | `INFO`  | Logging level, as a name (`INFO`, `DEBUG`) or a number (`20`, `10`) |
 | `LOG_DIR`   | (unset) | Also write a rotating log file, `adaptive-auth.log` (10 MB, 5 kept), to this directory. If it cannot be written, each worker logs one warning and keeps logging to the console only |
