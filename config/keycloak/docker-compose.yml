@@ -157,6 +157,7 @@ services:
       - amfa_net
 
   keycloak:
+    # Keep on 26.6.x until the AMFA plugin supports Keycloak 26.7+ (its Email OTP step fails there; see the plugin README, Compatibility).
     image: quay.io/keycloak/keycloak:26.6.3
     command: start-dev --import-realm
     environment:
