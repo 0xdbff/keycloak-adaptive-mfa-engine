@@ -342,6 +342,27 @@ authenticator app), Email OTP at 3, and a deny tier refuses the login after the
 provider has accepted it. The test realm in `config/keycloak` ships the flow
 as `amfa-post-broker`; bind it to your provider to try it.
 
+!!! warning
+    The post login flow is set per identity provider, and a new provider has
+    none. Logins through a provider without the AMFA flow skip AMFA entirely:
+    no risk score, no step-up and no deny, and nothing reports it. The engine
+    still receives the LOGIN event, but no decision is made for it. Bind every
+    provider, including any added later, and check the realm after changing
+    its providers:
+
+    ```bash
+    kcadm.sh get identity-provider/instances -r $REALM \
+      --fields alias,enabled,postBrokerLoginFlowAlias
+    ```
+
+    A provider listed without `postBrokerLoginFlowAlias` has no post login
+    flow.
+
+A provider has only one post login flow. If one of yours already has its own
+(for example to set attributes after the login), do not replace it with
+`amfa-post-broker`: add the executions listed above at the end of that flow
+instead, so both run.
+
 What AMFA does not see for these users:
 
 - A wrong password at the identity provider. The attempt never reaches
