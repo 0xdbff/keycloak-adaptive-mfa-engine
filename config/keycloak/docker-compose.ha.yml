@@ -56,6 +56,7 @@ networks:
 # direct debug port. The x-keycloak-common anchor is expanded into each
 # keycloak-* service with YAML merge keys (<<: *keycloak-common).
 x-keycloak-common: &keycloak-common
+  # Keep on 26.6.x until the AMFA plugin supports Keycloak 26.7+ (its Email OTP step fails there; see the plugin README, Compatibility).
   image: quay.io/keycloak/keycloak:26.6.3
   environment:
     KC_DB: postgres
