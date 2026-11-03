@@ -172,17 +172,23 @@ curl -X PUT "$KEYCLOAK/admin/realms/$REALM/events/config" \
 
 The listener also needs the AMFA authenticators bound into the realm's browser
 flow, so that each login captures the authentication context the webhook
-reports. In the "forms" subflow, after Username Password Form, add these as
-REQUIRED **in order**:
+reports. In the "forms" subflow, set these as REQUIRED **in this order**, the
+order the test realm in `config/keycloak` ships:
 
-1. **Screen Resolution** — renders a brief page whose JS
+1. **Screen Resolution**: renders a brief page whose JS
    captures `screen.width x screen.height` into the `screenResolution`
    session note (a risk signal). Requires the realm **Login theme** set to
    `keycloak-amfa` (Realm settings → Themes) so its template/JS load.
-2. **Auth User Context Authenticator** — captures device/geo/UA
+2. **Username Password Form**: the realm's own login form.
+3. **Auth User Context Authenticator**: captures device/geo/UA
    context and gets the auth-context hash from the engine.
-3. **Adaptive Authentication** — calls the engine for the ACR
+4. **Adaptive Authentication**: calls the engine for the ACR
    decision and drives step-up.
+
+Screen Resolution must come before the two AMFA steps, so that they see the
+value it captured. A login without a screen resolution, through a flow without
+this step or a direct grant, is still scored, with the screen resolution
+treated as unknown; the step gives the engine one more signal to compare.
 
 ## 6. Configure risk-based step-up
 
@@ -202,12 +208,21 @@ A condition only gates the flow when it sits inside a **Conditional** subflow
 (it is a no-op inside an Alternative subflow). So each tier is its own
 Conditional subflow. The reference policy below is
 
+- risk `>= 4` → the login is **refused**
 - risk `>= 3` → **Email OTP**
 - risk `== 2` → **TOTP**
 - risk `== 1` → no step-up
 
-Build it in the browser flow, as siblings *after* the "forms" subflow that ends
-with `Adaptive Authentication`:
+Build it inside the "forms" subflow, after `Adaptive Authentication`, as the
+test realm does. Do not put the tiers next to the "forms" subflow in the
+top-level browser flow: there, "forms" and Cookie are Alternative, and Keycloak
+ignores the Alternative steps of a level that also has Conditional ones, so no
+login form is shown at all.
+
+**AMFA Deny** (subflow, requirement **Conditional**)
+1. `Conditional - User Risk Level`: REQUIRED
+   - Risk Level: `4`, Comparison: `GREATER_OR_EQUAL`
+2. `Deny access` (`deny-access-authenticator`): REQUIRED
 
 **AMFA High Risk** (subflow, requirement **Conditional**)
 1. `Conditional - User Risk Level` — REQUIRED
@@ -219,9 +234,11 @@ with `Adaptive Authentication`:
    - Risk Level: `2`, Comparison: `EQUAL`
 2. `Adaptive MFA - TOTP` (`amfa-totp`) — REQUIRED
 
-Keep the two subflows independent (do not nest them). Because the medium tier
-matches `== 2` exactly, the tiers never overlap: a level-3 login runs Email only,
-a level-2 login runs TOTP only, and a level-1 login runs neither. Also disable
+Keep the three subflows independent (do not nest them), with AMFA Deny first.
+A level-4 login is refused by AMFA Deny before the email tier is reached, and
+because the medium tier matches `== 2` exactly, the other tiers never overlap: a
+level-3 login runs Email only, a level-2 login runs TOTP only, and a level-1
+login runs neither. Also disable
 Keycloak's stock "Browser - Conditional OTP/2FA" subflow so it does not add a
 second, unconditional challenge.
 
@@ -308,7 +325,78 @@ posterior and its bucketing in the engine log, set `LOG_LEVEL=DEBUG` (the
 `Log-Odds scoring: ... p(fraud)=... -> ACR=N` line); the summary
 `Bayesian scoring: p(fraud)=... => base ACR=N` line is logged at INFO.
 
-## 7. Verify
+## 7. Logins through an identity provider (SSO)
+
+Sections 5 and 6 put AMFA in the browser flow's "forms" subflow. A user who
+signs in through an identity provider (another Keycloak, Entra ID, Google and
+so on) leaves the browser flow at the provider's button, and Keycloak finishes
+the login in its broker flows. Without the setup below, such a login is not
+risk-scored: there is no decision and no step-up, and the engine only receives
+the login event.
+
+Run AMFA after the provider's login instead. Create a top-level flow, for
+example `amfa-post-broker`, with the same executions as the "forms" subflow
+except Username Password Form:
+
+1. **Screen Resolution**: REQUIRED
+2. **Auth User Context Authenticator**: REQUIRED
+3. **Adaptive Authentication**: REQUIRED
+4. The tier subflows from section 6, each **Conditional**. Create them again
+   inside this flow, with the same conditions: a subflow belongs to one flow.
+
+Then set it as the **Post login flow** of each identity provider whose users
+AMFA should score (Identity providers → *provider* → Post login flow), or:
+
+```bash
+kcadm.sh update identity-provider/instances/$IDP_ALIAS -r $REALM \
+  -s postBrokerLoginFlowAlias=amfa-post-broker
+```
+
+Keycloak runs the post login flow after every login through that provider,
+including a user's first, when the account is created. Every tier works there:
+no step-up at risk 1, TOTP at 2 (with enrollment for users without an
+authenticator app), Email OTP at 3, and a deny tier refuses the login after the
+provider has accepted it. The test realm in `config/keycloak` ships the flow
+as `amfa-post-broker`; bind it to your provider to try it.
+
+!!! warning
+    The post login flow is set per identity provider, and a new provider has
+    none. Logins through a provider without the AMFA flow skip AMFA entirely:
+    no risk score, no step-up and no deny, and nothing reports it. The engine
+    still receives the LOGIN event, but no decision is made for it. Bind every
+    provider, including any added later, and check the realm after changing
+    its providers:
+
+    ```bash
+    kcadm.sh get identity-provider/instances -r $REALM \
+      --fields alias,enabled,postBrokerLoginFlowAlias
+    ```
+
+    A provider listed without `postBrokerLoginFlowAlias` has no post login
+    flow.
+
+A provider has only one post login flow. If one of yours already has its own
+(for example to set attributes after the login), do not replace it with
+`amfa-post-broker`: add the executions listed above at the end of that flow
+instead, so both run.
+
+What AMFA does not see for these users:
+
+- A wrong password at the identity provider. The attempt never reaches
+  Keycloak; the provider handles it, including its own lockout.
+- A wrong TOTP or email code. Keycloak emits no event for it, for local users
+  either, so the engine does not learn of it. Keycloak's brute-force
+  protection still counts it.
+
+!!! note
+    The engine records device data (browser, OS, screen, language) for these
+    logins, and records a refused login against its user, only with a Keycloak
+    plugin that carries them onto brokered login events. No plugin release
+    does that yet (the latest is 1.0.1). Until one does, the login is still
+    scored and stepped up, but the engine stores it without device data, and a
+    refused one without its user.
+
+## 8. Verify
 
 ```bash
 # Should return 200 with the realm's parameters
