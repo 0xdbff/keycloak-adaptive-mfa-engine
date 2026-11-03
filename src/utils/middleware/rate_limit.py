@@ -1,6 +1,7 @@
 from src.core.exception import RateLimitException
 from src.core.config.environment import (
     RATE_LIMIT_MAX_REQ,
+    CONFIG_RATE_LIMIT_MAX_REQ,
     RATE_LIMIT,
     RATE_LIMIT_TIME_WINDOW,
 )
@@ -66,6 +67,9 @@ async def control_rate_limit(realm_id: str, user_id, bucket: str = "decision"):
     budget, causing spurious 429s on the settings/scoring endpoints. Giving
     each endpoint category its own bucket makes that cross-endpoint
     collision impossible regardless of what value a caller supplies.
+
+    The ``config`` bucket allows CONFIG_RATE_LIMIT_MAX_REQ requests per window,
+    every other bucket RATE_LIMIT_MAX_REQ.
     """
     if not RATE_LIMIT:
         return
@@ -81,13 +85,14 @@ async def control_rate_limit(realm_id: str, user_id, bucket: str = "decision"):
     # undercounting exactly the concurrent-request scenario this fix exists
     # to handle correctly.
     member = f"{now}:{uuid.uuid4()}"
+    max_req = CONFIG_RATE_LIMIT_MAX_REQ if bucket == "config" else RATE_LIMIT_MAX_REQ
 
     # register_script() does no I/O -- it just wraps the (constant) script
     # text and hashes it locally -- so calling it fresh here rather than
     # caching the result costs a cheap SHA1, not a round trip.
     script = redis.register_script(_RATE_LIMIT_SCRIPT)
     allowed = await script(
-        keys=[key], args=[now, RATE_LIMIT_TIME_WINDOW, RATE_LIMIT_MAX_REQ, member]
+        keys=[key], args=[now, RATE_LIMIT_TIME_WINDOW, max_req, member]
     )
 
     if not allowed:

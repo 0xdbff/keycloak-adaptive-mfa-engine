@@ -208,6 +208,13 @@ AMFA_TIMEOUT = float(os.getenv(key="AMFA_TIMEOUT", default=0.8))
 RATE_LIMIT = bool(os.getenv(key="RATE_LIMIT", default=True))
 RATE_LIMIT_MAX_REQ = int(os.getenv(key="RATE_LIMIT_MAX_REQ", default=4))
 RATE_LIMIT_TIME_WINDOW = int(os.getenv(key="RATE_LIMIT_TIME_WINDOW", default=60))
+# Settings and scoring writes per RATE_LIMIT_TIME_WINDOW, counted per realm and
+# per calling client. Separate from RATE_LIMIT_MAX_REQ, which is a per-user
+# limit for /decision: every admin of a realm writes through the same
+# Keycloak service account, so they all share this one budget, and the admin
+# page spends two writes (settings, then scoring) per Save. At the shared 4 a
+# third Save within a minute was refused.
+CONFIG_RATE_LIMIT_MAX_REQ = int(os.getenv(key="CONFIG_RATE_LIMIT_MAX_REQ", default=20))
 
 # Caps the number of distinct group_ids a single settings PUT may submit. Each
 # group is one activate_decision_params_config() write performed inside the
