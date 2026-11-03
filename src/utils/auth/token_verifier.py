@@ -4,6 +4,7 @@ import re
 import ssl
 import threading
 import time
+import urllib.error
 import urllib.request
 from collections import deque
 from dataclasses import dataclass
@@ -22,9 +23,11 @@ from src.core.config.environment import (
     OIDC_DISCOVERY_TIMEOUT,
     OIDC_CA_BUNDLE,
     DISCOVERY_FAILURE_CACHE_TTL,
+    DISCOVERY_UNREACHABLE_CACHE_TTL,
     DISCOVERY_FAILURE_CACHE_MAX_SIZE,
     DISCOVERY_RATE_LIMIT_MAX_ATTEMPTS,
     DISCOVERY_RATE_LIMIT_WINDOW_SECONDS,
+    DISCOVERY_MAX_WAITERS,
 )
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -115,6 +118,10 @@ _jwks_clients: dict[str, PyJWKClient] = {}
 # this concurrently, unlike asyncio coroutines on one loop.
 _discovery_failures_lock = threading.Lock()
 _discovery_failures: dict[str, float] = {}
+# The issuers in _discovery_failures whose last failure was Keycloak being
+# unreachable rather than the realm not existing; they are remembered only
+# for DISCOVERY_UNREACHABLE_CACHE_TTL. Guarded by the same lock.
+_discovery_unreachable: set[str] = set()
 
 # Caps total outbound discovery ATTEMPTS (not failures) across all issuers
 # combined, independent of the cache above: a client cycling through a
@@ -134,17 +141,51 @@ _discovery_attempt_times: deque = deque()
 # one's failure is ever recorded, so all N proceed to a real outbound fetch
 # -- measured at 36 of 40 truly-simultaneous requests against a single fake
 # realm. This single-flight guard closes that: only the first thread to
-# claim an issuer proceeds to the real fetch; any thread that finds it
-# already claimed fails immediately, with NO outbound call and NO rate-limit
-# budget spent. Checked/claimed under the same lock as the negative cache
-# (not a separate one), since both must be evaluated as one atomic step.
-_discovery_inflight: set = set()
+# claim an issuer makes the real fetch. Threads that find it already claimed
+# wait for that fetch and share its result, with NO outbound call and NO
+# rate-limit budget spent. Turning them away instead (the original
+# behaviour) failed legitimate traffic too: the admin page's two parallel
+# loads, or a burst of logins right after an engine restart, got a 503 for
+# every request but the first. At most DISCOVERY_MAX_WAITERS threads wait
+# at once; past that, a request still gets the immediate 503, so a flood
+# cannot park the whole worker-thread pool. Checked/claimed under the same
+# lock as the negative cache (not a separate one), since both must be
+# evaluated as one atomic step.
+class _DiscoveryFlight:
+    """One in-progress discovery fetch, shared with the threads waiting on it."""
+
+    __slots__ = ("done", "jwks_uri", "error")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.jwks_uri: str | None = None
+        self.error: AuthError | None = None
+
+
+_discovery_inflight: dict[str, _DiscoveryFlight] = {}
+_discovery_waiters = 0
+
+
+def _keycloak_unreachable(exc: Exception) -> bool:
+    """Whether a failed discovery fetch means Keycloak could not be reached
+    (connection error, timeout, a 5xx) rather than that the realm does not
+    exist (a 404 or other 4xx) or that the document was unusable."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code >= 500
+    return isinstance(exc, OSError)  # URLError, TimeoutError, ConnectionError
+
+
+def _failure_ttl(issuer: str) -> int:
+    if issuer in _discovery_unreachable:
+        return DISCOVERY_UNREACHABLE_CACHE_TTL
+    return DISCOVERY_FAILURE_CACHE_TTL
 
 
 def _prune_discovery_failures(now: float) -> None:
-    expired = [iss for iss, ts in _discovery_failures.items() if now - ts > DISCOVERY_FAILURE_CACHE_TTL]
+    expired = [iss for iss, ts in _discovery_failures.items() if now - ts > _failure_ttl(iss)]
     for iss in expired:
         del _discovery_failures[iss]
+        _discovery_unreachable.discard(iss)
     # Still over capacity after expiring stale entries (many distinct fake
     # issuers arriving within one TTL window) -> drop the oldest until back
     # under the cap. Bounds memory even under sustained attack traffic.
@@ -153,6 +194,7 @@ def _prune_discovery_failures(now: float) -> None:
         oldest = sorted(_discovery_failures.items(), key=lambda kv: kv[1])[:overflow]
         for iss, _ in oldest:
             del _discovery_failures[iss]
+            _discovery_unreachable.discard(iss)
 
 
 def _check_discovery_rate_limit(now: float) -> None:
@@ -171,25 +213,48 @@ def _discover_jwks_uri(issuer: str) -> str:
     fetch target is trusted (no SSRF surface). The discovery document's own issuer
     field must equal the issuer we looked it up under (OIDC integrity check).
     """
+    global _discovery_waiters
     now = time.time()
 
     with _discovery_failures_lock:
         _prune_discovery_failures(now)
         last_failure = _discovery_failures.get(issuer)
-        if last_failure is not None and now - last_failure <= DISCOVERY_FAILURE_CACHE_TTL:
+        if last_failure is not None and now - last_failure <= _failure_ttl(issuer):
             # Answered locally: a recent attempt for this exact issuer
             # already failed, so don't repeat the outbound fetch (or spend a
             # worker thread waiting on it) for every request that keeps
             # presenting it.
             raise AuthError(503, "Unable to fetch OIDC discovery document")
-        if issuer in _discovery_inflight:
-            # Another thread in this process is already fetching discovery
-            # for this exact issuer right now -- fail fast rather than
-            # making a second, redundant outbound attempt or waiting on the
-            # first one's result. A legitimate caller simply retries, same
-            # as any other transient 503 from this function.
+        flight = _discovery_inflight.get(issuer)
+        if flight is None:
+            flight = _DiscoveryFlight()
+            _discovery_inflight[issuer] = flight
+            leader = True
+        elif _discovery_waiters >= DISCOVERY_MAX_WAITERS:
+            # Enough threads are already parked on in-progress fetches; fail
+            # fast rather than tie up another one. A legitimate caller simply
+            # retries, same as any other transient 503 from this function.
             raise AuthError(503, "Unable to fetch OIDC discovery document")
-        _discovery_inflight.add(issuer)
+        else:
+            _discovery_waiters += 1
+            leader = False
+
+    if not leader:
+        # Another thread in this process is already fetching discovery for
+        # this exact issuer: wait for it and share its result instead of
+        # making a second, redundant outbound attempt. The fetch itself is
+        # bounded by OIDC_DISCOVERY_TIMEOUT; the extra second covers the
+        # work around it.
+        try:
+            finished = flight.done.wait(OIDC_DISCOVERY_TIMEOUT + 1)
+        finally:
+            with _discovery_failures_lock:
+                _discovery_waiters -= 1
+        if finished and flight.jwks_uri:
+            return flight.jwks_uri
+        if finished and flight.error is not None:
+            raise AuthError(flight.error.status_code, flight.error.detail)
+        raise AuthError(503, "Unable to fetch OIDC discovery document")
 
     try:
         _check_discovery_rate_limit(now)
@@ -205,26 +270,36 @@ def _discover_jwks_uri(issuer: str) -> str:
             )
             with _discovery_failures_lock:
                 _discovery_failures[issuer] = now
+                if _keycloak_unreachable(exc):
+                    _discovery_unreachable.add(issuer)
+                else:
+                    _discovery_unreachable.discard(issuer)
             raise AuthError(503, "Unable to fetch OIDC discovery document")
         if doc.get("issuer") != issuer:
             raise AuthError(403, "Discovery document issuer mismatch")
         jwks_uri = doc.get("jwks_uri")
         if not jwks_uri:
             raise AuthError(503, "Discovery document has no jwks_uri")
+        flight.jwks_uri = jwks_uri
         return jwks_uri
+    except AuthError as exc:
+        flight.error = exc
+        raise
     finally:
         with _discovery_failures_lock:
-            _discovery_inflight.discard(issuer)
+            _discovery_inflight.pop(issuer, None)
+        flight.done.set()
 
 
 def _jwks_client(issuer: str) -> PyJWKClient:
     client = _jwks_clients.get(issuer)
     if client is None:
         jwks_uri = _discover_jwks_uri(issuer)
-        client = PyJWKClient(
+        # Threads that shared one discovery fetch each get here with the same
+        # jwks_uri; keep the first client stored so they all use one key cache.
+        client = _jwks_clients.setdefault(issuer, PyJWKClient(
             jwks_uri, cache_keys=True, lifespan=JWKS_CACHE_TTL, ssl_context=_ssl_context()
-        )
-        _jwks_clients[issuer] = client
+        ))
     return client
 
 
