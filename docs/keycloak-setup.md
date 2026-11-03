@@ -172,17 +172,23 @@ curl -X PUT "$KEYCLOAK/admin/realms/$REALM/events/config" \
 
 The listener also needs the AMFA authenticators bound into the realm's browser
 flow, so that each login captures the authentication context the webhook
-reports. In the "forms" subflow, after Username Password Form, add these as
-REQUIRED **in order**:
+reports. In the "forms" subflow, set these as REQUIRED **in this order**, the
+order the test realm in `config/keycloak` ships:
 
-1. **Screen Resolution** — renders a brief page whose JS
+1. **Screen Resolution**: renders a brief page whose JS
    captures `screen.width x screen.height` into the `screenResolution`
    session note (a risk signal). Requires the realm **Login theme** set to
    `keycloak-amfa` (Realm settings → Themes) so its template/JS load.
-2. **Auth User Context Authenticator** — captures device/geo/UA
+2. **Username Password Form**: the realm's own login form.
+3. **Auth User Context Authenticator**: captures device/geo/UA
    context and gets the auth-context hash from the engine.
-3. **Adaptive Authentication** — calls the engine for the ACR
+4. **Adaptive Authentication**: calls the engine for the ACR
    decision and drives step-up.
+
+Screen Resolution must come before the two AMFA steps, so that they see the
+value it captured. A login without a screen resolution, through a flow without
+this step or a direct grant, is still scored, with the screen resolution
+treated as unknown; the step gives the engine one more signal to compare.
 
 ## 6. Configure risk-based step-up
 
@@ -202,12 +208,21 @@ A condition only gates the flow when it sits inside a **Conditional** subflow
 (it is a no-op inside an Alternative subflow). So each tier is its own
 Conditional subflow. The reference policy below is
 
+- risk `>= 4` → the login is **refused**
 - risk `>= 3` → **Email OTP**
 - risk `== 2` → **TOTP**
 - risk `== 1` → no step-up
 
-Build it in the browser flow, as siblings *after* the "forms" subflow that ends
-with `Adaptive Authentication`:
+Build it inside the "forms" subflow, after `Adaptive Authentication`, as the
+test realm does. Do not put the tiers next to the "forms" subflow in the
+top-level browser flow: there, "forms" and Cookie are Alternative, and Keycloak
+ignores the Alternative steps of a level that also has Conditional ones, so no
+login form is shown at all.
+
+**AMFA Deny** (subflow, requirement **Conditional**)
+1. `Conditional - User Risk Level`: REQUIRED
+   - Risk Level: `4`, Comparison: `GREATER_OR_EQUAL`
+2. `Deny access` (`deny-access-authenticator`): REQUIRED
 
 **AMFA High Risk** (subflow, requirement **Conditional**)
 1. `Conditional - User Risk Level` — REQUIRED
@@ -219,9 +234,11 @@ with `Adaptive Authentication`:
    - Risk Level: `2`, Comparison: `EQUAL`
 2. `Adaptive MFA - TOTP` (`amfa-totp`) — REQUIRED
 
-Keep the two subflows independent (do not nest them). Because the medium tier
-matches `== 2` exactly, the tiers never overlap: a level-3 login runs Email only,
-a level-2 login runs TOTP only, and a level-1 login runs neither. Also disable
+Keep the three subflows independent (do not nest them), with AMFA Deny first.
+A level-4 login is refused by AMFA Deny before the email tier is reached, and
+because the medium tier matches `== 2` exactly, the other tiers never overlap: a
+level-3 login runs Email only, a level-2 login runs TOTP only, and a level-1
+login runs neither. Also disable
 Keycloak's stock "Browser - Conditional OTP/2FA" subflow so it does not add a
 second, unconditional challenge.
 
