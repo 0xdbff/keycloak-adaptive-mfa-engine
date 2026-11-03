@@ -463,15 +463,16 @@ def redis_del_pattern(pattern: str) -> None:
 # --- pacing against the engine's rate limits ----------------------------------
 
 
-def _engine_rate_limit() -> tuple[int, float]:
-    """The engine's per-user /decision limit as (max requests, window seconds),
-    read from the engine container, or the engine's defaults if it can't be."""
+def _engine_rate_limit(bucket: str) -> tuple[int, float]:
+    """The engine's limit for ``bucket`` as (max requests, window seconds), read
+    from the engine container, or the engine's defaults if it can't be."""
     out = _docker("exec", DOCKER_ENGINE, "printenv") or ""
     env = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    name, default = ("CONFIG_RATE_LIMIT_MAX_REQ", 20) if bucket == "config" else ("RATE_LIMIT_MAX_REQ", 4)
     try:
-        return int(env.get("RATE_LIMIT_MAX_REQ", 4)), float(env.get("RATE_LIMIT_TIME_WINDOW", 60))
+        return int(env.get(name, default)), float(env.get("RATE_LIMIT_TIME_WINDOW", 60))
     except ValueError:
-        return 4, 60.0
+        return default, 60.0
 
 
 _pacing_warned = False
@@ -502,7 +503,8 @@ def wait_for_rate_limit_slot(bucket: str, identity: str, realm: str = REALM) -> 
 
     The engine allows RATE_LIMIT_MAX_REQ calls per RATE_LIMIT_TIME_WINDOW
     seconds for each (bucket, realm, identity): ``decision`` per user, for
-    /decision, and ``config`` per caller, for the settings and scoring writes.
+    /decision, and ``config`` per caller (CONFIG_RATE_LIMIT_MAX_REQ instead),
+    for the settings and scoring writes.
     The scenarios here log in as one user and change settings as one service
     account, so by the later ones a window can be full and their own call would
     get a 429 that says nothing about what they check. This paces the suite to
@@ -513,7 +515,7 @@ def wait_for_rate_limit_slot(bucket: str, identity: str, realm: str = REALM) -> 
     (at most _MAX_RATE_LIMIT_WAIT) plus a margin and lets the call go ahead, so
     a stuck or very long limit shows up as the 429 it is rather than a hang.
     """
-    max_req, window = _engine_rate_limit()
+    max_req, window = _engine_rate_limit(bucket)
     key = f"rl:{bucket}:{realm}:{identity}"
     # A window longer than this is not one a test run can wait out; the call
     # then goes ahead and its 429 says so.

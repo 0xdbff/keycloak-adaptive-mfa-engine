@@ -319,11 +319,12 @@ list, which is off by default because its redistribution grant is not establishe
 
 ## Rate Limiting
 
-| Variable                 | Default | Description                                        |
-| ------------------------ | ------- | -------------------------------------------------- |
-| `RATE_LIMIT`             | `True`  | Enable or disable rate limiting                    |
-| `RATE_LIMIT_MAX_REQ`     | `4`     | Maximum number of requests allowed per time window |
-| `RATE_LIMIT_TIME_WINDOW` | `60`    | Rate limit time window in seconds                  |
+| Variable                    | Default | Description                                                                                                       |
+| --------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------- |
+| `RATE_LIMIT`                | `True`  | Enable or disable rate limiting                                                                                   |
+| `RATE_LIMIT_MAX_REQ`        | `4`     | Maximum `/decision` requests per user and realm per time window                                                   |
+| `CONFIG_RATE_LIMIT_MAX_REQ` | `20`    | Maximum settings and scoring writes per realm and calling client per time window (the admin page uses 2 per Save) |
+| `RATE_LIMIT_TIME_WINDOW`    | `60`    | Rate limit time window in seconds                                                                                 |
 
 ## Server
 
