@@ -1,0 +1,181 @@
+name: ${E2E_SSO_PROJECT:-amfa-sso-e2e}
+
+# Stack for the identity-provider (SSO) login suite, started and torn down by
+# run_sso_e2e.py. It is separate from config/keycloak/docker-compose.yml so the
+# suite can run next to that stack: every published port is configurable and
+# Keycloak serves plain HTTP, so no certificates are needed.
+#
+# Keycloak listens on the same port inside and outside its container, and the
+# suite's login driver resolves the Keycloak hostname to 127.0.0.1. One URL,
+# http://<E2E_SSO_KC_HOST>:<E2E_SSO_KC_PORT>, therefore works for the browser
+# side, for Keycloak's own broker calls to the "corp" realm, and for the engine
+# verifying token issuers, without a LAN address or /etc/hosts entry.
+#
+# Profile "cluster" adds a second Keycloak node and a small load balancer; see
+# README.md.
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  sso_net:
+    driver: bridge
+
+services:
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Same initialisation as the main stack: adaptive_mfa database plus uuid-ossp.
+      - ../../../config/keycloak/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    networks:
+      - sso_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    networks:
+      - sso_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  mailpit:
+    image: axllent/mailpit:latest
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    networks:
+      - sso_net
+    ports:
+      - "${E2E_SSO_MAILPIT_PORT:-18125}:8025"
+
+  adaptive_auth:
+    build:
+      context: ../../../
+      dockerfile: Dockerfile
+    # The engine defaults of the main stack, with the settings this stack needs
+    # on top: plain-HTTP Keycloak as the trusted issuer, no CA bundle, and a rate
+    # limit high enough for a burst of test logins from one address.
+    env_file:
+      - ../../../config/keycloak/.env.example
+    environment:
+      OIDC_TRUSTED_BASE_URLS: ${E2E_SSO_KC_URL}
+      OIDC_CA_BUNDLE: ""
+      RATE_LIMIT_MAX_REQ: "10000"
+      CONFIG_RATE_LIMIT_MAX_REQ: "10000"
+      LOG_LEVEL: INFO
+    networks:
+      - sso_net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:80/health', timeout=3)"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Pass-through proxy in front of the engine. While its control file holds a
+  # number, it replaces the risk level of every /decision answer, so each tier
+  # can be reached on demand. Keycloak talks to the engine only through it.
+  risk_proxy:
+    image: ${E2E_SSO_PYTHON_IMAGE:-python:3.12-alpine}
+    command: ["python", "/suite/risk_override_proxy.py", "8099", "http://adaptive_auth:80", "/run/control/forced-risk"]
+    volumes:
+      - ./risk_override_proxy.py:/suite/risk_override_proxy.py:ro
+      - ${E2E_SSO_RUN_DIR}:/run/control
+    networks:
+      - sso_net
+    depends_on:
+      adaptive_auth:
+        condition: service_healthy
+
+  keycloak:
+    image: ${E2E_SSO_KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.6.3}
+    command: ["start-dev", "--import-realm"]
+    # Only matters in cluster mode: if the second node wins the race to create
+    # Keycloak's tables, this one exits once and restarts.
+    restart: on-failure
+    environment: &keycloak-env
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${E2E_SSO_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${E2E_SSO_ADMIN_PASS:-admin}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: password
+      KC_HOSTNAME: ${E2E_SSO_KC_URL}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: ${E2E_SSO_KC_NODE1_PORT}
+      KC_CACHE: ${E2E_SSO_KC_CACHE:-local}
+      KC_CACHE_STACK: jdbc-ping
+      # Same as the main stack: avoids a WorkflowsEventListenerFactory NPE in
+      # 26.6.3 dev mode.
+      KC_FEATURES_DISABLED: workflows
+      AMFA_WEBHOOK_AUDIENCE: amfa-webhook-event
+    volumes:
+      - ${E2E_SSO_RUN_DIR}/providers:/opt/keycloak/providers:ro
+      - ${E2E_SSO_RUN_DIR}/import:/opt/keycloak/data/import:ro
+    networks:
+      sso_net:
+        aliases:
+          - ${E2E_SSO_KC_NODE1_ALIAS}
+    ports:
+      - "${E2E_SSO_KC_NODE1_PORT}:${E2E_SSO_KC_NODE1_PORT}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  keycloak2:
+    profiles: ["cluster"]
+    image: ${E2E_SSO_KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.6.3}
+    # The first node imports the realms; the second joins the same database.
+    # Started together, the second node can race the first one creating
+    # Keycloak's tables and exit; it then restarts and joins.
+    command: ["start-dev"]
+    restart: on-failure
+    environment:
+      <<: *keycloak-env
+      KC_HTTP_PORT: ${E2E_SSO_KC_NODE2_PORT:-18182}
+    volumes:
+      - ${E2E_SSO_RUN_DIR}/providers:/opt/keycloak/providers:ro
+    networks:
+      - sso_net
+    ports:
+      - "${E2E_SSO_KC_NODE2_PORT:-18182}:${E2E_SSO_KC_NODE2_PORT:-18182}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Alternates every request between the two nodes, so a login's steps land on
+  # both of them.
+  kc_lb:
+    profiles: ["cluster"]
+    image: ${E2E_SSO_PYTHON_IMAGE:-python:3.12-alpine}
+    command: ["python", "/suite/lb.py", "${E2E_SSO_KC_PORT:-18180}",
+              "http://keycloak:${E2E_SSO_KC_NODE1_PORT}", "http://keycloak2:${E2E_SSO_KC_NODE2_PORT:-18182}"]
+    volumes:
+      - ./lb.py:/suite/lb.py:ro
+    networks:
+      sso_net:
+        aliases:
+          - ${E2E_SSO_KC_HOST:-sso-keycloak}
+    ports:
+      - "${E2E_SSO_KC_PORT:-18180}:${E2E_SSO_KC_PORT:-18180}"
