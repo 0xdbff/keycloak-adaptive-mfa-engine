@@ -32,8 +32,10 @@ class DecisionRequest(BaseModel):
       String representation of the user agent (typically includes browser and OS info).
     - **system_language (str)**:
       Language setting of the user's system or client.
-    - **screen_resolution (str)**:
-      Screen resolution of the user's device.
+    - **screen_resolution (str | None)**:
+      Screen resolution of the user's device. A login that has none (a direct
+      grant, or a flow without the screen resolution step) leaves it out;
+      the signal is then scored as unknown.
     - **cookie (str | None)**:
       Optional cookie string.
     """
@@ -65,10 +67,12 @@ class DecisionRequest(BaseModel):
     system_language: str = Field(
         ..., description="Language setting of the user's system or client."
     )
-    screen_resolution: str = Field(
-        ..., description="Screen resolution of the user's device."
+    screen_resolution: str | None = Field(
+        None, description="Screen resolution of the user's device, if known."
     )
-    auth_context_hash: str = Field(..., description="Auth context hash.")
+    # Not used by the decision, which derives the context from the device and
+    # the network itself; a login whose /auth_context call failed has none.
+    auth_context_hash: str | None = Field(None, description="Auth context hash.")
     cookie: str | None = Field(None, description="Optional cookie string.")
 
     @field_validator("ip_address")
@@ -85,14 +89,17 @@ class DecisionRequest(BaseModel):
         return v
 
     @field_validator("screen_resolution")
-    def validate_screen_resolution(cls, v: str) -> str:
+    def validate_screen_resolution(cls, v: str | None) -> str | None:
         """
         Require the "<digits>x<digits>" form ScreenResolutionChecker expects
         (e.g. "1920x1080"). Anything else is rejected here, at the request
         boundary, rather than reaching the risk evaluation and aborting it --
         an unconstrained value let a single malformed field (or an empty
-        string) suppress the entire adaptive decision.
+        string) suppress the entire adaptive decision. A missing value means
+        the login has no screen resolution; the decision scores it as unknown.
         """
+        if v is None:
+            return None
         if not SCREEN_RESOLUTION_REGEX.fullmatch(v):
             raise ValueError(
                 f"'{v}' is not a valid screen resolution (expected '<width>x<height>', "

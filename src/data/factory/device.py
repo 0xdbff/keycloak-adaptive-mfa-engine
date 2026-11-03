@@ -15,6 +15,9 @@ class DeviceFactory:
         request: DecisionRequest | AuthContextSchema,
     ) -> str:
         agent_info = UserAgentInfo(request.user_agent)
+        # A login without a screen resolution is fingerprinted with an empty one,
+        # the same value its event webhook carries, so both name one device.
+        screen_resolution = request.screen_resolution or ""
 
         browser_signal = agent_info.get_browser_signal(
             DEVICE_SIGNAL_INCLUDE_BROWSER_VERSION
@@ -22,7 +25,7 @@ class DeviceFactory:
 
         attrs = [
             str(request.client),
-            str(request.screen_resolution),
+            str(screen_resolution),
             str(request.system_language),
             str(agent_info.get_device()),
             str(browser_signal),
@@ -40,7 +43,7 @@ class DeviceFactory:
                 device=str(agent_info.get_device()),
                 client=str(request.client),
                 system_language=str(request.system_language),
-                screen_resolution=str(request.screen_resolution),
+                screen_resolution=str(screen_resolution),
                 operating_system=str(agent_info.get_os_family_major()),
                 browser=str(browser_signal),
             )
