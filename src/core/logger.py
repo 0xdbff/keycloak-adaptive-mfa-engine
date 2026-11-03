@@ -45,11 +45,23 @@ def setup_logging():
     # guarded so a file-logging problem can never crash the app or flood the
     # console with a per-record traceback (the previous behaviour when the log
     # directory did not exist -> FileNotFoundError on every emit()).
+    file_logging = False
     if LOG_DIR:
         try:
             os.makedirs(LOG_DIR, exist_ok=True)
+            log_file = os.path.join(LOG_DIR, "adaptive-auth.log")
+            # makedirs succeeds on a directory that already exists but that this
+            # user cannot write (a root-owned volume once the image runs as
+            # non-root, or a read-only mount). The handler would then fail on
+            # every emit(), and logging prints each failure as a traceback.
+            # Check up front instead: the handler needs the directory for its
+            # lock file and for rotation, and the file itself for appending.
+            if not os.access(LOG_DIR, os.W_OK | os.X_OK):
+                raise PermissionError(f"directory is not writable: {LOG_DIR}")
+            with open(log_file, "a", encoding="utf-8"):
+                pass
             file_handler = ConcurrentRotatingFileHandler(
-                os.path.join(LOG_DIR, "adaptive-auth.log"),
+                log_file,
                 mode="a",
                 maxBytes=10 * 1024 * 1024,
                 backupCount=5,
@@ -58,6 +70,7 @@ def setup_logging():
             file_handler.setFormatter(formatter)
             file_handler.setLevel(level)
             logger.addHandler(file_handler)
+            file_logging = True
         except OSError as exc:
             logger.warning(
                 "File logging disabled; could not use LOG_DIR=%s: %s", LOG_DIR, exc
@@ -66,5 +79,5 @@ def setup_logging():
     logging.info(
         "Logging is configured (level=%s, file=%s).",
         logging.getLevelName(level),
-        bool(LOG_DIR),
+        file_logging,
     )
