@@ -8,6 +8,10 @@ from jwt.exceptions import PyJWKClientError, PyJWKClientConnectionError
 
 import src.utils.auth.token_verifier as tv
 
+# The autouse fixture below stubs _jwks_client out; keep the real one for the
+# tests that exercise it directly.
+_real_jwks_client = tv._jwks_client
+
 BASE = "https://kc.test/auth"
 ISSUER = "https://kc.test/auth/realms/testrealm"
 
@@ -31,8 +35,10 @@ def patch_jwks(monkeypatch, keypair):
     monkeypatch.setattr(tv, "OIDC_CA_BUNDLE", None)
     tv._key_cache.clear()  # isolate stale-cache state between tests
     tv._discovery_failures.clear()  # isolate negative-cache state between tests
+    tv._discovery_unreachable.clear()
     tv._discovery_attempt_times.clear()  # isolate rate-limiter state between tests
     tv._discovery_inflight.clear()  # isolate single-flight state between tests
+    monkeypatch.setattr(tv, "_discovery_waiters", 0)
 
 def _token(keypair, **overrides):
     claims = {"iss": ISSUER, "sub": "user-1", "azp": "amfa-client",
@@ -476,6 +482,101 @@ def test_negative_cache_expires_after_ttl(monkeypatch):
     assert calls["n"] == 2, "expired cache entry must allow a fresh outbound attempt"
 
 
+def _failing_urlopen(monkeypatch, calls, exc):
+    def _raise(*a, **k):
+        calls["n"] += 1
+        raise exc
+    monkeypatch.setattr(tv.urllib.request, "urlopen", _raise)
+
+
+def _http_error(code):
+    return tv.urllib.error.HTTPError(ISSUER, code, "error", {}, None)
+
+
+def _age_failure(seconds):
+    """Pretend the issuer's cached failure happened `seconds` ago."""
+    tv._discovery_failures[ISSUER] = time.time() - seconds
+
+
+@pytest.mark.parametrize("exc", [
+    OSError("connection refused"),
+    TimeoutError("timed out"),
+    tv.urllib.error.URLError(TimeoutError("timed out")),
+    _http_error(503),
+], ids=["refused", "timeout", "urlerror-timeout", "http-503"])
+def test_keycloak_unreachable_is_remembered_only_briefly(monkeypatch, exc):
+    """A failure that says Keycloak could not be reached is not something a
+    client can cause by naming a fake realm, so it uses the short
+    DISCOVERY_UNREACHABLE_CACHE_TTL: the realm recovers within seconds of
+    Keycloak coming back instead of answering 503 for the full failure TTL."""
+    calls = {"n": 0}
+    _failing_urlopen(monkeypatch, calls, exc)
+
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    assert calls["n"] == 1, "a repeat within the short TTL must still be answered locally"
+
+    _age_failure(tv.DISCOVERY_UNREACHABLE_CACHE_TTL + 1)
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    assert calls["n"] == 2, "after the short TTL a fresh attempt must be allowed"
+
+
+@pytest.mark.parametrize("exc", [_http_error(404), _http_error(400), ValueError("not JSON")],
+                         ids=["http-404", "http-400", "bad-document"])
+def test_a_missing_realm_keeps_the_full_failure_ttl(monkeypatch, exc):
+    """A 404 is what Keycloak answers for a realm that does not exist, the
+    case the negative cache protects against, so it keeps the long TTL."""
+    calls = {"n": 0}
+    _failing_urlopen(monkeypatch, calls, exc)
+
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    _age_failure(tv.DISCOVERY_UNREACHABLE_CACHE_TTL + 1)
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    assert calls["n"] == 1, "still within the full failure TTL"
+
+    _age_failure(tv.DISCOVERY_FAILURE_CACHE_TTL + 1)
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    assert calls["n"] == 2
+
+
+def test_a_missing_realm_after_an_outage_gets_the_full_ttl_again(monkeypatch):
+    calls = {"n": 0}
+    _failing_urlopen(monkeypatch, calls, OSError("connection refused"))
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    assert ISSUER in tv._discovery_unreachable
+
+    _age_failure(tv.DISCOVERY_UNREACHABLE_CACHE_TTL + 1)
+    _failing_urlopen(monkeypatch, calls, _http_error(404))
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    assert ISSUER not in tv._discovery_unreachable
+
+    _age_failure(tv.DISCOVERY_UNREACHABLE_CACHE_TTL + 1)
+    with pytest.raises(tv.AuthError):
+        tv._discover_jwks_uri(ISSUER)
+    assert calls["n"] == 2, "the 404 must be remembered for the full TTL"
+
+
+def test_pruning_forgets_the_unreachable_marker(monkeypatch):
+    now = time.time()
+    tv._discovery_failures["gone"] = now - (tv.DISCOVERY_UNREACHABLE_CACHE_TTL + 1)
+    tv._discovery_unreachable.add("gone")
+    tv._discovery_failures["recent"] = now
+    tv._discovery_unreachable.add("recent")
+
+    tv._prune_discovery_failures(now)
+
+    assert "gone" not in tv._discovery_failures and "gone" not in tv._discovery_unreachable
+    assert "recent" in tv._discovery_failures and "recent" in tv._discovery_unreachable
+
+
 def test_negative_cache_bounded_by_max_size(monkeypatch):
     """A client cycling through distinct fake realm names is otherwise
     unbounded (the realm segment is attacker-chosen) -- the cache itself
@@ -616,28 +717,11 @@ def test_single_flight_marker_is_released_after_completion(monkeypatch):
     assert jwks_uri == doc["jwks_uri"]
 
 
-def test_single_flight_losers_do_not_pollute_the_negative_cache_on_a_legitimate_success(monkeypatch):
-    """Adversarial-review follow-up: a genuinely NEW, VALID realm hit by many
-    concurrent logins at once (e.g. an enterprise SSO cutover) must have
-    exactly ONE thread perform the real fetch while the rest fail fast --
-    but those losers must NOT be recorded as a discovery FAILURE. If they
-    were, this fix would penalize legitimate concurrent traffic with the
-    same negative-cache TTL meant for actual bad realms."""
-    N = 20
-    start_barrier = threading.Barrier(N)
-    doc = {"issuer": ISSUER, "jwks_uri": ISSUER + "/protocol/openid-connect/certs"}
-    calls = {"n": 0}
-    calls_lock = threading.Lock()
-
-    def _slow_success(*a, **k):
-        with calls_lock:
-            calls["n"] += 1
-        time.sleep(0.2)  # hold the race window open for every racer to arrive
-        return _FakeResponse(doc)
-
-    monkeypatch.setattr(tv.urllib.request, "urlopen", _slow_success)
-
-    results = [None] * N
+def _race_discovery(n, urlopen, monkeypatch):
+    """Release n threads at once into _discover_jwks_uri(ISSUER); return each result."""
+    start_barrier = threading.Barrier(n)
+    monkeypatch.setattr(tv.urllib.request, "urlopen", urlopen)
+    results = [None] * n
 
     def _race(i):
         start_barrier.wait()
@@ -646,17 +730,120 @@ def test_single_flight_losers_do_not_pollute_the_negative_cache_on_a_legitimate_
         except tv.AuthError as e:
             results[i] = e.status_code
 
+    threads = [threading.Thread(target=_race, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    return results
+
+
+def _slow_fetch(doc, calls, delay=0.2):
+    calls_lock = threading.Lock()
+
+    def _fetch(*a, **k):
+        with calls_lock:
+            calls["n"] += 1
+        time.sleep(delay)  # hold the race window open for every racer to arrive
+        return _FakeResponse(doc)
+
+    return _fetch
+
+
+def test_concurrent_requests_for_a_new_realm_share_one_successful_fetch(monkeypatch):
+    """A genuinely NEW, VALID realm hit by several requests at once (the admin
+    page loads its settings and scoring config in parallel; a burst of logins
+    right after an engine restart) must make exactly ONE outbound fetch, and
+    every request must get its result. Turning the others away with a 503,
+    the original single-flight behaviour, failed legitimate traffic. None of
+    them may be recorded as a discovery failure."""
+    N = 20
+    monkeypatch.setattr(tv, "DISCOVERY_MAX_WAITERS", N)
+    doc = {"issuer": ISSUER, "jwks_uri": ISSUER + "/protocol/openid-connect/certs"}
+    calls = {"n": 0}
+
+    results = _race_discovery(N, _slow_fetch(doc, calls), monkeypatch)
+
+    assert calls["n"] == 1, f"expected exactly 1 real fetch across {N} racers, got {calls['n']}"
+    assert results == [doc["jwks_uri"]] * N, f"every racer must get the shared result, got {results}"
+    assert ISSUER not in tv._discovery_failures
+    assert tv._discovery_waiters == 0, "the waiter count must return to zero"
+    assert ISSUER not in tv._discovery_inflight
+
+
+def test_waiters_past_the_cap_still_fail_fast(monkeypatch):
+    """Each waiter holds a worker thread, so only DISCOVERY_MAX_WAITERS may
+    wait at once; everyone past that gets the immediate 503, with no outbound
+    call, exactly as before. A legitimate success must still not be recorded
+    as a failure for the ones turned away."""
+    N = 20
+    monkeypatch.setattr(tv, "DISCOVERY_MAX_WAITERS", 3)
+    doc = {"issuer": ISSUER, "jwks_uri": ISSUER + "/protocol/openid-connect/certs"}
+    calls = {"n": 0}
+
+    results = _race_discovery(N, _slow_fetch(doc, calls), monkeypatch)
+
+    assert calls["n"] == 1
+    winners = [r for r in results if r == doc["jwks_uri"]]
+    losers = [r for r in results if r == 503]
+    assert len(winners) == 1 + 3, f"expected the fetcher plus 3 waiters to succeed, got {len(winners)}"
+    assert len(losers) == N - 4, f"expected {N - 4} fail-fast 503s, got {len(losers)}"
+    assert ISSUER not in tv._discovery_failures, (
+        "requests turned away by the cap on a SUCCESSFUL fetch must not be recorded as a failure"
+    )
+    assert tv._discovery_waiters == 0
+
+
+def test_waiters_get_the_fetchers_error(monkeypatch):
+    """A waiter must see the same outcome as the fetch it waited on, including
+    a non-503 rejection such as an issuer mismatch."""
+    N = 5
+    monkeypatch.setattr(tv, "DISCOVERY_MAX_WAITERS", N)
+    doc = {"issuer": "https://kc.test/auth/realms/other", "jwks_uri": "https://x/certs"}
+    calls = {"n": 0}
+
+    results = _race_discovery(N, _slow_fetch(doc, calls), monkeypatch)
+
+    assert calls["n"] == 1
+    assert results == [403] * N, f"every racer must get the mismatch rejection, got {results}"
+
+
+def test_a_waiter_gives_up_when_the_fetch_outlasts_its_timeout(monkeypatch):
+    """A waiter waits at most OIDC_DISCOVERY_TIMEOUT + 1 seconds, then gets a
+    503 and releases its slot, even if the fetch it waited on is still running."""
+    monkeypatch.setattr(tv, "OIDC_DISCOVERY_TIMEOUT", 0)  # waiter gives up after ~1s
+    doc = {"issuer": ISSUER, "jwks_uri": ISSUER + "/protocol/openid-connect/certs"}
+    calls = {"n": 0}
+
+    results = _race_discovery(2, _slow_fetch(doc, calls, delay=1.6), monkeypatch)
+
+    assert calls["n"] == 1
+    assert sorted(results, key=str) == sorted([doc["jwks_uri"], 503], key=str), results
+    assert tv._discovery_waiters == 0, "a waiter that timed out must release its slot"
+
+
+def test_concurrent_first_requests_share_one_jwks_client(monkeypatch):
+    """Threads that shared one discovery fetch must also end up with one stored
+    PyJWKClient, so they share one key cache instead of each fetching keys."""
+    N = 8
+    monkeypatch.setattr(tv, "DISCOVERY_MAX_WAITERS", N)
+    monkeypatch.setattr(tv, "_jwks_clients", {})
+    doc = {"issuer": ISSUER, "jwks_uri": ISSUER + "/protocol/openid-connect/certs"}
+    calls = {"n": 0}
+    monkeypatch.setattr(tv.urllib.request, "urlopen", _slow_fetch(doc, calls))
+    start_barrier = threading.Barrier(N)
+    clients = [None] * N
+
+    def _race(i):
+        start_barrier.wait()
+        clients[i] = _real_jwks_client(ISSUER)
+
     threads = [threading.Thread(target=_race, args=(i,)) for i in range(N)]
     for t in threads:
         t.start()
     for t in threads:
-        t.join(timeout=5)
+        t.join(timeout=10)
 
-    assert calls["n"] == 1, f"expected exactly 1 real fetch across {N} racers, got {calls['n']}"
-    winners = [r for r in results if r == doc["jwks_uri"]]
-    losers = [r for r in results if r == 503]
-    assert len(winners) == 1, f"expected exactly 1 winner, got {len(winners)}"
-    assert len(losers) == N - 1, f"expected {N - 1} fail-fast losers, got {len(losers)}"
-    assert ISSUER not in tv._discovery_failures, (
-        "single-flight losers on a SUCCESSFUL fetch must not be recorded as a failure"
-    )
+    assert calls["n"] == 1
+    assert all(c is not None for c in clients)
+    assert all(c is tv._jwks_clients[ISSUER] for c in clients), "all racers must use the stored client"
