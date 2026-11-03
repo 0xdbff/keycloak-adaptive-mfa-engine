@@ -108,6 +108,7 @@ async def test_different_buckets_do_not_share_state_for_the_same_realm_and_user(
     state."""
     monkeypatch.setattr(rate_limit_mod, "RATE_LIMIT", True)
     monkeypatch.setattr(rate_limit_mod, "RATE_LIMIT_MAX_REQ", 2)
+    monkeypatch.setattr(rate_limit_mod, "CONFIG_RATE_LIMIT_MAX_REQ", 2)
     await _clear("decision", "r", "shared-client-id")
     await _clear("config", "r", "shared-client-id")
 
@@ -122,6 +123,35 @@ async def test_different_buckets_do_not_share_state_for_the_same_realm_and_user(
     await control_rate_limit(realm_id="r", user_id="shared-client-id", bucket="config")
     with pytest.raises(RateLimitException):
         await control_rate_limit(realm_id="r", user_id="shared-client-id", bucket="config")
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_config_writes_have_their_own_limit(monkeypatch):
+    """Every admin of a realm writes settings and scoring through the same
+    Keycloak service account, and each Save costs two writes, so the config
+    bucket needs a larger budget than a single user's /decision calls."""
+    monkeypatch.setattr(rate_limit_mod, "RATE_LIMIT", True)
+    monkeypatch.setattr(rate_limit_mod, "RATE_LIMIT_MAX_REQ", 2)
+    monkeypatch.setattr(rate_limit_mod, "CONFIG_RATE_LIMIT_MAX_REQ", 5)
+    await _clear("config", "r", "admin-client")
+
+    for _ in range(5):
+        await control_rate_limit(realm_id="r", user_id="admin-client", bucket="config")
+    with pytest.raises(RateLimitException):
+        await control_rate_limit(realm_id="r", user_id="admin-client", bucket="config")
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_the_config_limit_does_not_raise_the_decision_limit(monkeypatch):
+    monkeypatch.setattr(rate_limit_mod, "RATE_LIMIT", True)
+    monkeypatch.setattr(rate_limit_mod, "RATE_LIMIT_MAX_REQ", 2)
+    monkeypatch.setattr(rate_limit_mod, "CONFIG_RATE_LIMIT_MAX_REQ", 5)
+    await _clear("decision", "r", "a-user")
+
+    for _ in range(2):
+        await control_rate_limit(realm_id="r", user_id="a-user", bucket="decision")
+    with pytest.raises(RateLimitException):
+        await control_rate_limit(realm_id="r", user_id="a-user", bucket="decision")
 
 
 @pytest.mark.asyncio(loop_scope="session")
