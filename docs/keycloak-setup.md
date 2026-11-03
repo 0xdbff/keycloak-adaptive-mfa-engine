@@ -308,7 +308,57 @@ posterior and its bucketing in the engine log, set `LOG_LEVEL=DEBUG` (the
 `Log-Odds scoring: ... p(fraud)=... -> ACR=N` line); the summary
 `Bayesian scoring: p(fraud)=... => base ACR=N` line is logged at INFO.
 
-## 7. Verify
+## 7. Logins through an identity provider (SSO)
+
+Sections 5 and 6 put AMFA in the browser flow's "forms" subflow. A user who
+signs in through an identity provider (another Keycloak, Entra ID, Google and
+so on) leaves the browser flow at the provider's button, and Keycloak finishes
+the login in its broker flows. Without the setup below, such a login is not
+risk-scored: there is no decision and no step-up, and the engine only receives
+the login event.
+
+Run AMFA after the provider's login instead. Create a top-level flow, for
+example `amfa-post-broker`, with the same executions as the "forms" subflow
+except Username Password Form:
+
+1. **Screen Resolution**: REQUIRED
+2. **Auth User Context Authenticator**: REQUIRED
+3. **Adaptive Authentication**: REQUIRED
+4. The tier subflows from section 6, each **Conditional**. Create them again
+   inside this flow, with the same conditions: a subflow belongs to one flow.
+
+Then set it as the **Post login flow** of each identity provider whose users
+AMFA should score (Identity providers → *provider* → Post login flow), or:
+
+```bash
+kcadm.sh update identity-provider/instances/$IDP_ALIAS -r $REALM \
+  -s postBrokerLoginFlowAlias=amfa-post-broker
+```
+
+Keycloak runs the post login flow after every login through that provider,
+including a user's first, when the account is created. Every tier works there:
+no step-up at risk 1, TOTP at 2 (with enrollment for users without an
+authenticator app), Email OTP at 3, and a deny tier refuses the login after the
+provider has accepted it. The test realm in `config/keycloak` ships the flow
+as `amfa-post-broker`; bind it to your provider to try it.
+
+What AMFA does not see for these users:
+
+- A wrong password at the identity provider. The attempt never reaches
+  Keycloak; the provider handles it, including its own lockout.
+- A wrong TOTP or email code. Keycloak emits no event for it, for local users
+  either, so the engine does not learn of it. Keycloak's brute-force
+  protection still counts it.
+
+!!! note
+    The engine records device data (browser, OS, screen, language) for these
+    logins, and records a refused login against its user, only with a Keycloak
+    plugin that carries them onto brokered login events. No plugin release
+    does that yet (the latest is 1.0.1). Until one does, the login is still
+    scored and stepped up, but the engine stores it without device data, and a
+    refused one without its user.
+
+## 8. Verify
 
 ```bash
 # Should return 200 with the realm's parameters
