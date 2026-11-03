@@ -53,9 +53,20 @@ is fetched from the issuer), and every AMFA realm needs an
 | `OIDC_CLOCK_SKEW_LEEWAY` | `30`    | Allowed clock skew (seconds) for token exp/iat.                                                 |
 | `JWKS_CACHE_TTL`         | `300`   | Signing-key cache lifetime and stale-key fallback window during a JWKS outage (seconds).         |
 | `OIDC_DISCOVERY_TIMEOUT` | `5`     | Timeout (seconds) for the OIDC discovery / JWKS fetch.                                          |
+| `DISCOVERY_FAILURE_CACHE_TTL` | `30` | How long (seconds) a failed discovery lookup is remembered when it says the realm does not exist (a 404 or other 4xx, or an unusable discovery document). Requests for that issuer meanwhile get a 503 without an outbound fetch. |
+| `DISCOVERY_UNREACHABLE_CACHE_TTL` | `5` | The same, when the failure says Keycloak could not be reached (connection error, timeout or a 5xx). Kept short so every realm recovers within seconds once Keycloak is back. |
+| `DISCOVERY_FAILURE_CACHE_MAX_SIZE` | `1000` | Most failed issuers remembered at once; past it the oldest entries are dropped. |
+| `DISCOVERY_RATE_LIMIT_MAX_ATTEMPTS` | `10` | Outbound discovery fetches allowed across all issuers per `DISCOVERY_RATE_LIMIT_WINDOW_SECONDS`. Past it a request needing a fetch gets a 503. |
+| `DISCOVERY_RATE_LIMIT_WINDOW_SECONDS` | `10` | Window (seconds) for `DISCOVERY_RATE_LIMIT_MAX_ATTEMPTS`. |
+| `DISCOVERY_MAX_WAITERS` | half the thread pool | Requests that may wait at once for another request's discovery fetch for the same realm and share its result, instead of getting an immediate 503. The default is `min(32, CPU count + 4) // 2`, half the worker-thread pool, where the CPU count is the host's even when the container has a CPU limit. |
 | `WEBHOOK_REPLAY_TTL`     | `300`   | Replay-protection window (seconds) for signed webhook `jti`s.                                    |
+| `AMFA_WEBHOOK_AUDIENCE`  | `amfa-webhook-event` | Required `aud` claim of the login-event webhook token. Must match the `AMFA_WEBHOOK_AUDIENCE` set on Keycloak for the AMFA event listener. Empty counts as unset. |
 | `OIDC_CA_BUNDLE`         | (unset) | Optional PEM CA bundle to trust for the discovery/JWKS fetch (private/internal CA). Unset uses the system trust store. |
 | `MONITORING_TRUSTED_READERS` | (empty) | Comma-separated `{issuer}\|{client_id}` pairs, e.g. `https://sso.example.com/realms/master\|monitoring-service`. Each listed client's **service-account** token may read the read-only `/{realm}/monitoring/*` endpoints of any realm, not only its own. A person signing in through the same client is not trusted, and `/decision`, `/settings` and the webhook still require a token from the realm itself. Empty keeps every monitoring read same-realm. A malformed entry stops startup. Each cross-realm read is logged at INFO. |
+
+The discovery failure cache, its rate limit and `DISCOVERY_MAX_WAITERS` are kept
+in each worker process, so with `WORKERS` processes the engine-wide ceiling is up
+to `WORKERS` times each value.
 
 ## Risk-Level Decisions
 
@@ -64,6 +75,8 @@ is fetched from the issuer), and every AMFA realm needs an
 | `DEFAULT_RISK_LEVEL`      | `2`     | Risk level returned when no prior risk data exists for the user     |
 | `FALLBACK_RISK_LEVEL`     | `3`     | Not currently read by any evaluation path -- a failed evaluation returns a server error instead of a risk level (see below). Kept only as a guarded setting: the engine refuses to start if this is set more permissive than `DEFAULT_RISK_LEVEL`. |
 | `REJECTED_AUTH_RISK_LEVEL`| `4`     | Risk level assigned to explicitly rejected authentications          |
+| `DROP_DOWN_DECAY_DAYS`    | `30`    | A clean login relaxes the risk one level below the previous decision. If the previous login was more than this many days before this one, it relaxes by `DROP_DOWN_DECAY_STEPS` levels instead. |
+| `DROP_DOWN_DECAY_STEPS`   | `2`     | Levels to relax by in that case, never below Risk 1. `1` turns the faster decay off. |
 
 `FALLBACK_RISK_LEVEL` is vestigial. Evaluation failures (timeouts, storage
 errors, unhandled exceptions) return a non-2xx response with no `riskLevel` in
@@ -117,6 +130,44 @@ treated as a very unfamiliar context and risk is forced up.
 | `TIME_ZONE`             | `Europe/Lisbon` | Timezone applied to datetime-based risk checks                      |
 | `IMPOSSIBLE_TRAVEL_MAX_SPEED_KMH`     | `900` | Absolute speed cap for impossible-travel; a leg above it is always impossible |
 | `IMPOSSIBLE_TRAVEL_BURST_GAP_MINUTES` | `60`  | The above-median relative check only flags when logins are closer in time than this |
+| `GEOLOC_RADIUS`         | `100`           | Radius (km) within which login locations count as the same place when the user's locations are clustered (`geolocation_cluster_label` signal) |
+
+Three checks look at patterns in the user's recent history. Each also needs its
+signal enabled in the realm's settings; the `*_ENABLED` switch turns it off for
+the whole engine. A switch reads `1`, `true`, `yes` or `on` as on, and anything
+else as off.
+
+**Login failures** (`login_failure` signal), over the user's failed logins:
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `LOGIN_FAILURE_DETECTION_ENABLED` | `true` | Run the check |
+| `LOGIN_FAILURE_WINDOW_MINUTES` | `60` | How far back (minutes) failed logins are counted |
+| `LOGIN_FAILURE_RATE_THRESHOLD` | `5` | Failed logins in the window that flag the user |
+| `LOGIN_FAILURE_DISTINCT_IP_THRESHOLD` | `3` | Distinct source addresses among those failures that flag the user (distributed brute force) |
+| `LOGIN_FAILURE_DOS_CAP` | `50` | Failed logins in the window that flag the user whatever the pattern |
+
+The check also flags evenly timed failures and short bursts; those two
+thresholds are fixed.
+
+**Concurrent sessions** (`concurrent_session` signal), approximated by the
+user's successful logins, including the current one:
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `CONCURRENT_SESSION_DETECTION_ENABLED` | `true` | Run the check |
+| `CONCURRENT_SESSION_ACTIVE_WINDOW_MINUTES` | `30` | Logins within this many minutes count as active sessions |
+| `CONCURRENT_SESSION_DISTINCT_IP_THRESHOLD` | `3` | Distinct source addresses among them that flag the user (credential sharing) |
+| `CONCURRENT_SESSION_PER_IP_THRESHOLD` | `10` | Logins from a single address among them that flag the user (automation) |
+
+**Recent account change** (`recent_account_change` signal), a login soon after
+a sensitive account change reported by the Keycloak event listener:
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `ACCOUNT_ACTION_DETECTION_ENABLED` | `true` | Run the check |
+| `ACCOUNT_ACTION_WINDOW_MINUTES` | `1440` | A login within this many minutes after such a change is flagged. The engine keeps these events for at most 31 days, so a longer window sees no further back |
+| `ACCOUNT_ACTION_EVENT_TYPES` | see description | Comma-separated Keycloak event types that count as a sensitive change. Default: `UPDATE_PASSWORD`, `RESET_PASSWORD`, `UPDATE_CREDENTIAL`, `REMOVE_CREDENTIAL`, `UPDATE_EMAIL`, `FEDERATED_IDENTITY_LINK`, `IDENTITY_PROVIDER_LINK_ACCOUNT`, `REMOVE_FEDERATED_IDENTITY` |
 
 ## IP Intelligence
 
@@ -326,10 +377,19 @@ list, which is off by default because its redistribution grant is not establishe
 | `CONFIG_RATE_LIMIT_MAX_REQ` | `20`    | Maximum settings and scoring writes per realm and calling client per time window (the admin page uses 2 per Save) |
 | `RATE_LIMIT_TIME_WINDOW`    | `60`    | Rate limit time window in seconds                                                                                 |
 
+## Settings Writes
+
+| Variable                        | Default | Description |
+| ------------------------------- | ------- | ----------- |
+| `MAX_CONFIG_GROUPS_PER_REQUEST` | `50`    | Most groups one settings write may submit; a larger submission is refused with 422 |
+| `CONFIG_LOCK_TIMEOUT_SECONDS`   | `30`    | How long a realm's settings or scoring write may hold its lock, and how long another write or read of the same realm and resource waits for it before giving up with 408. Must exceed the slowest write, about two database writes per submitted group |
+
 ## Server
 
 | Variable    | Default | Description                                        |
 | ----------- | ------- | -------------------------------------------------- |
 | `WORKERS`   | `4`     | Number of Uvicorn worker processes                 |
-| `LOG_LEVEL` | `10`    | Python logging level (10 = DEBUG, 20 = INFO, etc.) |
-| `DEBUG`     | `False` | Enable debug mode                                  |
+| `ENGINE_PORT` | `80`  | Port the engine listens on inside its container. The image runs as a non-root user; Docker lets it bind 80, but runtimes that keep the 1024 floor (some Kubernetes and podman setups) need a port above 1024. Keycloak calls the engine at each realm's AMFA Engine Endpoint, so that endpoint must include the new port too, for example `http://adaptive_auth:8081` |
+| `LOG_LEVEL` | `INFO`  | Logging level, as a name (`INFO`, `DEBUG`) or a number (`20`, `10`) |
+| `LOG_DIR`   | (unset) | Also write a rotating log file, `adaptive-auth.log` (10 MB, 5 kept), to this directory. If it cannot be written, each worker logs one warning and keeps logging to the console only |
+| `DEBUG`     | `False` | Not read by the engine; it has no effect           |
