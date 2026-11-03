@@ -101,7 +101,7 @@ MALFORMED = [
     pytest.param(None, {"ip_address": "999.999.999.999"}, "an impossible address", id="bad-ip"),
     pytest.param(None, {"ip_address": "not-an-address"}, "a non-address string", id="not-an-ip"),
     pytest.param(None, {"client": {"nested": {"deeper": [1] * 50}}}, "a nested object where a string belongs", id="nested-object"),
-    pytest.param(None, {"screen_resolution": None}, "a null in a required field", id="null-field"),
+    pytest.param(None, {"user_agent": None}, "a null in a required field", id="null-field"),
     pytest.param(
         None, {"screen_resolution": "abc"}, "a non-numeric screen resolution",
         id="non-numeric-screen-resolution",
@@ -138,6 +138,26 @@ def test_a_malformed_decision_request_is_refused_rather_than_scored(
         f"the engine returned a risk level for {description}, so unusable input "
         f"produced a decision about whether to challenge a user: {response.text[:300]}"
     )
+
+
+def test_a_decision_request_without_a_screen_resolution_is_scored(token, base_context):
+    """V01. A login that has no screen resolution, such as a direct grant, is not
+    malformed. The SPI sends the field as null and, when /auth_context failed, no
+    auth context hash; the login must still get a risk level, not a 422 that leaves
+    Keycloak on the realm's fallback risk."""
+    body = {
+        **base_context,
+        "event_id": str(uuid.uuid4()),
+        "screen_resolution": None,
+    }
+
+    response = post_decision(token, body)
+
+    assert response.status_code == 200, (
+        f"a decision request without a screen resolution was answered "
+        f"HTTP {response.status_code} instead of scored: {response.text[:300]}"
+    )
+    assert "riskLevel" in response.json(), response.text[:300]
 
 
 # --- V02: authentication ---------------------------------------------------

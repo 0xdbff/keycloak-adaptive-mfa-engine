@@ -11,8 +11,8 @@ class AuthContextSchema(BaseModel):
       String representation of the user agent (typically includes browser and OS info).
     - **system_language (str)**:
       Language setting of the user's system or client.
-    - **screen_resolution (str)**:
-      Screen resolution of the user's device.
+    - **screen_resolution (str | None)**:
+      Screen resolution of the user's device, if the login has one.
     - **cookie (str | None)**:
       Optional cookie string.
     """
@@ -30,7 +30,7 @@ class AuthContextSchema(BaseModel):
     system_language: str = Field(
         ..., description="Language setting of the user's system or client."
     )
-    screen_resolution: str = Field(
-        ..., description="Screen resolution of the user's device."
+    screen_resolution: str | None = Field(
+        None, description="Screen resolution of the user's device, if known."
     )
     cookie: str | None = Field(None, description="Optional cookie string.")

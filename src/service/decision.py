@@ -55,6 +55,9 @@ from src.service.risk_evaluation.explain import (
 
 _MS_PER_DAY = 86_400_000  # 24 * 60 * 60 * 1000
 
+# Request signals a login may not have; see DecisionService._unavailable_signals.
+OPTIONAL_SIGNALS = ("screen_resolution",)
+
 
 class DecisionService:
     """Service that evaluates the authentication context to produce a risk-level decision.
@@ -502,6 +505,7 @@ class DecisionService:
                 changed_vars=changed_vars,
                 device_credibility=device_credibility,
                 net_loc_credibility=net_loc_credibility,
+                unavailable_vars=self._unavailable_signals(risk_eval_vars),
             )
             logging.info(
                 "Bayesian scoring: p(fraud)=%.4f evidence=%.4f bias=%.2f => base Risk %d",
@@ -733,7 +737,11 @@ class DecisionService:
                 A list of parameter names considered "changed."
         """
         meta_keys = {"__meta"}
-        request_variables = set(self.decision_params.keys()) - meta_keys
+        request_variables = (
+            set(self.decision_params.keys())
+            - meta_keys
+            - self._unavailable_signals(risk_eval_vars)
+        )
 
         prev_ev = risk_eval_vars.get("previous_event", {})
         curr_ev = risk_eval_vars.get("current_event", {})
@@ -834,6 +842,24 @@ class DecisionService:
         return blacklisted
 
     @staticmethod
+    def _unavailable_signals(risk_eval_vars: dict) -> set:
+        """Signals this login cannot be compared on.
+
+        A login without a screen resolution (a direct grant, or a flow without
+        the screen resolution step) cannot be said to have kept or changed it,
+        and neither can a login whose previous one had none. Such a signal is
+        left out of the change detection and earns no trust. A first login,
+        with no previous one at all, keeps the signal as before.
+        """
+        previous = risk_eval_vars.get("previous_event") or {}
+        current = risk_eval_vars.get("current_event") or {}
+        unavailable = set()
+        for signal in OPTIONAL_SIGNALS:
+            if not current.get(signal) or (previous and not previous.get(signal)):
+                unavailable.add(signal)
+        return unavailable
+
+    @staticmethod
     def _bucket_screen_resolution(current_resolution, user_id) -> str:
         """Classify a screen resolution into its closest common bucket.
 
@@ -850,6 +876,8 @@ class DecisionService:
         this is defense in depth for any other path that could still produce
         one, so a single degraded signal never becomes a lost decision.
         """
+        if current_resolution is None:
+            return None
         try:
             return ScreenResolutionChecker(
                 current_resolution=current_resolution
