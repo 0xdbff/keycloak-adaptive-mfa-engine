@@ -1,0 +1,162 @@
+{
+  "authenticationFlows": [
+    {
+      "alias": "amfa-post-broker",
+      "description": "AMFA for logins through an identity provider: set as the provider's Post login flow.",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "cookie-screen-resolution",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "auth-context-authenticator",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 22,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "adaptive-auth",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 23,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "CONDITIONAL",
+          "priority": 24,
+          "autheticatorFlow": true,
+          "flowAlias": "post-broker AMFA Deny",
+          "userSetupAllowed": false
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "CONDITIONAL",
+          "priority": 25,
+          "autheticatorFlow": true,
+          "flowAlias": "post-broker AMFA High Risk",
+          "userSetupAllowed": false
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "CONDITIONAL",
+          "priority": 26,
+          "autheticatorFlow": true,
+          "flowAlias": "post-broker AMFA Medium Risk",
+          "userSetupAllowed": false
+        }
+      ]
+    },
+    {
+      "alias": "post-broker AMFA Deny",
+      "description": "Risk 4 is the rejection level: refuse the login outright rather than offering a step-up.",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticatorConfig": "post-broker risk-4-GREATER_OR_EQUAL",
+          "authenticator": "conditional-adaptive-auth",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 0,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "deny-access-authenticator",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 1,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false
+        }
+      ]
+    },
+    {
+      "alias": "post-broker AMFA High Risk",
+      "description": "risk>=3 -> Email",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticatorConfig": "post-broker risk-3-GREATER_OR_EQUAL",
+          "authenticator": "conditional-adaptive-auth",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 0,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "amfa-email",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 1,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false
+        }
+      ]
+    },
+    {
+      "alias": "post-broker AMFA Medium Risk",
+      "description": "risk==2 -> TOTP",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticatorConfig": "post-broker risk-2-EQUAL",
+          "authenticator": "conditional-adaptive-auth",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 0,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "amfa-totp",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 1,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false
+        }
+      ]
+    }
+  ],
+  "authenticatorConfig": [
+    {
+      "alias": "post-broker risk-4-GREATER_OR_EQUAL",
+      "config": {
+        "conditionalAuthRiskLevelOperator": "GREATER_OR_EQUAL",
+        "conditionalAuthRiskLevelConfig": "4"
+      }
+    },
+    {
+      "alias": "post-broker risk-3-GREATER_OR_EQUAL",
+      "config": {
+        "conditionalAuthRiskLevelOperator": "GREATER_OR_EQUAL",
+        "conditionalAuthRiskLevelConfig": "3"
+      }
+    },
+    {
+      "alias": "post-broker risk-2-EQUAL",
+      "config": {
+        "conditionalAuthRiskLevelOperator": "EQUAL",
+        "conditionalAuthRiskLevelConfig": "2"
+      }
+    }
+  ]
+}
