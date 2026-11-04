@@ -30,7 +30,14 @@ import requests
 # definition of them. They used to be spelled out here with an "rhsso-" prefix, which
 # only matched a stack started with `-p rhsso`; the compose file now declares
 # `name: amfa`, and anything hardcoded would break on the next rename regardless.
-from tests.e2e.e2e_common import DOCKER_ENGINE, DOCKER_PG, PG_DB, PG_USER
+from tests.e2e.e2e_common import (
+    DOCKER_ENGINE,
+    DOCKER_PG,
+    IS_MSSQL,
+    PG_DB,
+    PG_USER,
+    mssql_query,
+)
 
 KC_BASE = os.getenv("E2E_KC_BASE", "https://keycloak:8443")
 # Defaults suit running this from the host, where the suite lives: Keycloak is
@@ -515,15 +522,12 @@ def last_verdict(user_id: str, since: int) -> dict | None:
 
 def completed_logins(user_id: str) -> int:
     """LOGIN rows for the user, which is what the history gate counts."""
-    out = subprocess.run(
-        ["docker", "exec", "-e", "PGPASSWORD=password", DOCKER_PG,
-         "psql", "-U", PG_USER, "-d", PG_DB, "-t", "-A", "-c",
-         f"select count(*) from auth_process where user_id='{user_id}' "
-         f"and final_status='LOGIN';"],
-        capture_output=True, text=True, timeout=60,
+    raw = psql(
+        f"select count(*) from auth_process where user_id='{user_id}' "
+        f"and final_status='LOGIN';"
     )
     try:
-        return int(out.stdout.strip().splitlines()[0])
+        return int(raw.splitlines()[0])
     except (ValueError, IndexError):
         return -1
 
@@ -558,6 +562,8 @@ def train(context: dict, username: str, user_id: str, target: int = 5) -> list[d
 # --- profile cloning -------------------------------------------------------
 
 def psql(sql: str) -> str:
+    if IS_MSSQL:
+        return mssql_query(sql)
     out = subprocess.run(
         ["docker", "exec", "-e", "PGPASSWORD=password", DOCKER_PG,
          "psql", "-U", PG_USER, "-d", PG_DB, "-t", "-A", "-c", sql],
@@ -568,10 +574,14 @@ def psql(sql: str) -> str:
 
 def stored_device_hash(user_id: str) -> str:
     """The device hash the engine computed for a user's most recent login."""
-    return psql(
-        f"select device_info_hash from auth_process "
-        f"where user_id='{user_id}' order by started_at desc limit 1;"
-    ).strip()
+    return _latest_login_column("device_info_hash", user_id).strip()
+
+
+def _latest_login_column(column: str, user_id: str) -> str:
+    where = f"from auth_process where user_id='{user_id}' order by started_at desc"
+    if IS_MSSQL:
+        return psql(f"select top 1 {column} {where};")
+    return psql(f"select {column} {where} limit 1;")
 
 
 def stored_auth_context(user_id: str) -> dict:
@@ -583,10 +593,8 @@ def stored_auth_context(user_id: str) -> dict:
     """
     import json
 
-    raw = psql(
-        f"select auth_context_json::text from auth_process "
-        f"where user_id='{user_id}' order by started_at desc limit 1;"
-    )
+    column = "auth_context_json" if IS_MSSQL else "auth_context_json::text"
+    raw = _latest_login_column(column, user_id)
     try:
         return json.loads(raw.strip())
     except (ValueError, AttributeError):
@@ -627,6 +635,10 @@ def clone_profile(golden_id: str, user_id: str, days_ago_of_oldest: int = 8,
     fix and an accurate description of the profile being modelled: a user whose recent
     logins were unremarkable.
     """
+    if IS_MSSQL:
+        return _clone_profile_mssql(
+            golden_id, user_id, days_ago_of_oldest, hour_shift, prior_decision, rows_to_copy
+        )
     return psql(f"""
     with src as (
         select *, row_number() over (order by started_at) as n
@@ -652,6 +664,39 @@ def clone_profile(golden_id: str, user_id: str, days_ago_of_oldest: int = 8,
         {prior_decision}, parameters_config_id, final_status,
         now() - (({days_ago_of_oldest} - n) || ' days')::interval,
         now() - (({days_ago_of_oldest} - n) || ' days')::interval + interval '4 seconds',
+        risk_eval_vars, net_loc_credibility, device_credibility, realm_id
+    from src;
+    """)
+
+
+def _clone_profile_mssql(golden_id: str, user_id: str, days_ago_of_oldest: int,
+                         hour_shift: int, prior_decision: int,
+                         rows_to_copy: int | None) -> str:
+    """`clone_profile` in T-SQL, which has no `jsonb_set` or interval arithmetic."""
+    top = f"top ({rows_to_copy})" if rows_to_copy is not None else ""
+    order = "order by started_at" if rows_to_copy is not None else ""
+    happened = f"dateadd(day, n - {days_ago_of_oldest}, sysutcdatetime())"
+    return psql(f"""
+    with src as (
+        select {top} *, row_number() over (order by started_at) as n
+        from auth_process
+        where user_id = '{golden_id}' and final_status = 'LOGIN'
+        {order}
+    )
+    insert into auth_process (
+        id, user_id, auth_context_hash, device_info_hash, network_location_hash,
+        auth_context_json, pre_auth_risk_decision, parameters_config_id, final_status,
+        started_at, finished_at, risk_eval_vars, net_loc_credibility,
+        device_credibility, realm_id)
+    select newid(), '{user_id}', auth_context_hash, device_info_hash,
+        network_location_hash,
+        json_modify(
+            auth_context_json, '$.event_time',
+            datediff_big(millisecond, '1970-01-01', dateadd(hour, -{hour_shift}, {happened}))
+        ),
+        {prior_decision}, parameters_config_id, final_status,
+        {happened},
+        dateadd(second, 4, {happened}),
         risk_eval_vars, net_loc_credibility, device_credibility, realm_id
     from src;
     """)

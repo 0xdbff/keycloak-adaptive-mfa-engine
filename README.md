@@ -69,12 +69,12 @@ Keycloak SPI (Java)          Adaptive MFA Engine (Python)
    Authenticator               ◄─── Risk 1-4           (ML + rules)
 ```
 
-The engine is a FastAPI microservice. It connects to PostgreSQL (event history) and Redis (distributed mutex, caching, rate limiting).
+The engine is a FastAPI microservice. It connects to PostgreSQL by default (event history) and Redis (distributed mutex, caching, rate limiting). Azure SQL is the same codebase with `DB_TYPE=mssql`; see [Environment Variables](docs/environment-variables.md).
 
 ## Prerequisites
 
 - **Docker and Docker Compose** — the quick-start stack runs entirely in containers
-- **PostgreSQL `uuid-ossp`** — required. Compose and the base migration both create it. Some managed Postgres products need it allow-listed at the server first (see [Environment Variables](docs/environment-variables.md)).
+- **PostgreSQL `uuid-ossp`** — required on the default Postgres path. Compose and the base migration both create it. Some managed Postgres products need it allow-listed at the server first (see [Environment Variables](docs/environment-variables.md)). Azure SQL (`DB_TYPE=mssql`) uses `NEWID()` instead.
 - **`keycloak` hostname** — Keycloak tokens use `https://keycloak:8443` as the issuer, so
   both the engine container and your browser need to resolve the hostname. Add this once:
 

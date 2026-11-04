@@ -82,6 +82,17 @@ container.
   `https://keycloak:8443/*`), and user `alice` / `Passw0rd!` with an email
   address.
 
+## SQL Server
+
+The suite runs against SQL Server when the engine does. Set `DB_TYPE=mssql` and the
+`POSTGRES_*` variables on the engine, then run the suite with `E2E_DB_TYPE=mssql`. Its
+database queries then go through the engine container, so they need no SQL client.
+`test_signal_gating_e2e.py` and `test_inactive_days_e2e.py` import the engine, so run
+them inside the engine container as shown above, where the engine's own settings apply.
+The SSO suite in `tests/e2e/sso` starts its own stack on Postgres, so it does not run
+against SQL Server.
+Keycloak keeps its own Postgres database either way.
+
 ## Configuration
 
 Every endpoint and credential is overridable via environment variables (defaults

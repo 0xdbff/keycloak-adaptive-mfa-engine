@@ -90,6 +90,13 @@ def raised(why: str) -> list[str]:
 
 
 def latest_decision(user_id: str) -> dict:
+    if lib.IS_MSSQL:
+        return json.loads(lib.psql(
+            "select top 1 id, device_info_hash as device, "
+            "json_value(auth_context_json, '$.screen_resolution') as screen "
+            f"from auth_process where user_id = '{user_id}' order by started_at desc "
+            "for json path, without_array_wrapper, include_null_values;"
+        ))
     return json.loads(lib.psql(
         "select json_build_object('id', id, 'device', device_info_hash, "
         "'screen', auth_context_json::json->>'screen_resolution') "

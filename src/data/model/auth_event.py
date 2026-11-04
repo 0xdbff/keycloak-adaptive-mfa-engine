@@ -10,18 +10,20 @@ To facilitate faster retrieval of the most recent records, a composite index
 is defined over `(auth_process, event_time DESC)`.
 """
 
+import uuid
+
 from sqlalchemy import (
     Column,
     String,
-    Text,
     DateTime,
     ForeignKey,
-    text,
     Index,
+    Uuid,
     desc,
 )
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
+
+from src.core.sql_dialect import hashed_str, ident_str, long_text, uuid_server_default
 
 from .base import Base
 
@@ -54,24 +56,25 @@ class AuthEvent(Base):
     )
 
     id = Column(
-        UUID(as_uuid=True),
+        Uuid(as_uuid=True),
         primary_key=True,
-        server_default=text("uuid_generate_v4()"),
+        default=uuid.uuid4,
+        server_default=uuid_server_default(),
         doc="Primary key: auto-generated UUID (v4).",
     )
     auth_process = Column(
-        UUID(as_uuid=True),
+        Uuid(as_uuid=True),
         ForeignKey("auth_process.id"),
         nullable=True,
         doc="References the auth_process for which this event belongs.",
     )
     user_id = Column(
-        UUID(as_uuid=True),
+        Uuid(as_uuid=True),
         nullable=True,
         doc="References the user initiating this auth process.",
     )
     realm_id = Column(
-        String(255),
+        ident_str(255),
         nullable=True,
         doc=(
             "The Keycloak realm (tenant) that signed the webhook event this "
@@ -80,21 +83,21 @@ class AuthEvent(Base):
         ),
     )
     event_type = Column(String(32), nullable=False, doc="The type of the event.")
-    details = Column(Text, doc="Additional details provided by the Keycloak SPI for this event.")
+    details = Column(long_text(), doc="Additional details provided by the Keycloak SPI for this event.")
 
     auth_context_hash = Column(
-        String(64),
+        hashed_str(64),
         nullable=True,
         doc="References the auth_context.hash.",
     )
     device_info_hash = Column(
-        String(64),
+        hashed_str(64),
         ForeignKey("device.hash"),
         nullable=True,
         doc="References the device.hash.",
     )
     network_location_hash = Column(
-        String(64),
+        hashed_str(64),
         ForeignKey("location_network.hash"),
         nullable=True,
         doc="References the location_network.hash.",

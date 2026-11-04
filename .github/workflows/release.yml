@@ -15,50 +15,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: amfa
-          POSTGRES_PASSWORD: amfa
-          POSTGRES_DB: amfa
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U amfa"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      redis:
-        image: redis:7-alpine
-        ports: ["6379:6379"]
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      POSTGRES_HOST: localhost
-      POSTGRES_PORT: "5432"
-      POSTGRES_USER: amfa
-      POSTGRES_PASSWORD: amfa
-      POSTGRES_DB: amfa
-      POSTGRES_SCHEMA: public
-      REDIS_HOST: localhost
-      REDIS_PORT: "6379"
-      REDIS_DB: "0"
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-          cache: pip
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Database migrations
-        run: python -m alembic upgrade head
-      - name: Unit tests
-        run: python -m pytest tests/unit -m "not slow"
+    uses: ./.github/workflows/ci.yml
 
   release:
     needs: test

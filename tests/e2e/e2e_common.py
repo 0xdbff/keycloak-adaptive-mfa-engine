@@ -58,6 +58,10 @@ DOCKER_KEYCLOAK = os.getenv("E2E_DOCKER_KEYCLOAK", f"{COMPOSE_PROJECT}-keycloak-
 DOCKER_MAILPIT = os.getenv("E2E_DOCKER_MAILPIT", f"{COMPOSE_PROJECT}-mailpit-1")
 PG_DB = os.getenv("E2E_PG_DB", "adaptive_mfa")
 PG_USER = os.getenv("E2E_PG_USER", "keycloak")
+# The engine's database. `mssql` routes SQL through the engine container, so the
+# suite needs no client tools beside the server and also works against Azure SQL.
+DB_TYPE = os.getenv("E2E_DB_TYPE", "postgresql")
+IS_MSSQL = DB_TYPE == "mssql"
 
 # The form action URLs Keycloak renders use its configured hostname, which in the
 # bundled compose stack is the internal "keycloak:8443" (TLS terminated at
@@ -437,7 +441,45 @@ def engine_log_since(base_lines: int) -> str:
     return "\n".join(out.splitlines()[base_lines:])
 
 
+_MSSQL_RUNNER = """
+import sys
+from sqlalchemy import create_engine
+from src.core.config.environment import DATABASE_URL
+
+with create_engine(DATABASE_URL).begin() as connection:
+    result = connection.exec_driver_sql(sys.stdin.read())
+    if result.returns_rows:
+        for row in result:
+            print("|".join("" if value is None else str(value) for value in row))
+"""
+
+
+def _mssql_run(sql: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["docker", "exec", "-i", "-w", "/app", DOCKER_ENGINE, "python", "-c", _MSSQL_RUNNER],
+        input=sql, capture_output=True, text=True, timeout=60,
+    )
+
+
+def _lowercase_uuids(text: str) -> str:
+    """uniqueidentifier reads back uppercase, and the suite compares ids as text."""
+    return re.sub(
+        r"\b[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}\b",
+        lambda match: match.group().lower(),
+        text,
+    )
+
+
+def mssql_query(sql: str) -> str:
+    """Run SQL on the engine's SQL Server and print rows the way `psql -tA` does."""
+    out = _mssql_run(sql)
+    return _lowercase_uuids(out.stdout.strip() or out.stderr.strip())
+
+
 def db_scalar(sql: str) -> str | None:
+    if IS_MSSQL:
+        out = _mssql_run(sql)
+        return _lowercase_uuids(out.stdout.strip()) if out.returncode == 0 else None
     out = _docker("exec", DOCKER_PG, "psql", "-U", PG_USER, "-d", PG_DB, "-tAc", sql)
     return out.strip() if out is not None else None
 

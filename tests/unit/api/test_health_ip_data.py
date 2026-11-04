@@ -51,13 +51,16 @@ def healthy_backends(monkeypatch):
     monkeypatch.setattr(
         health_module, "async_sessionmaker", type(maker), raising=True
     )
-    monkeypatch.setattr(health_module.DB, "get_session", staticmethod(lambda: maker))
+    monkeypatch.setattr(health_module.DB, "get_health_session", staticmethod(lambda: maker))
 
     class Redis:
         async def ping(self):
             return True
 
-    monkeypatch.setattr(health_module, "get_redis", lambda: Redis())
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(health_module, "new_health_redis", lambda: Redis())
 
 
 # --- plain /health: summary word only, never the full inventory ------------
@@ -133,13 +136,16 @@ async def test_database_failure_still_fails_readiness(monkeypatch):
     def broken_session():
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(health_module.DB, "get_session", staticmethod(broken_session))
+    monkeypatch.setattr(health_module.DB, "get_health_session", staticmethod(broken_session))
 
     class Redis:
         async def ping(self):
             return True
 
-    monkeypatch.setattr(health_module, "get_redis", lambda: Redis())
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(health_module, "new_health_redis", lambda: Redis())
     monkeypatch.setattr(health_module.report, "status_only", lambda: {"status": "ok"})
 
     response = await HealthRoute().health_check()
@@ -156,7 +162,7 @@ async def test_redis_failure_still_fails_readiness(healthy_backends, monkeypatch
         async def ping(self):
             raise RuntimeError("redis down")
 
-    monkeypatch.setattr(health_module, "get_redis", lambda: Redis())
+    monkeypatch.setattr(health_module, "new_health_redis", lambda: Redis())
     monkeypatch.setattr(health_module.report, "status_only", lambda: {"status": "ok"})
 
     response = await HealthRoute().health_check()
@@ -233,13 +239,16 @@ async def test_health_detail_database_failure_still_fails_readiness(monkeypatch)
     def broken_session():
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(health_module.DB, "get_session", staticmethod(broken_session))
+    monkeypatch.setattr(health_module.DB, "get_health_session", staticmethod(broken_session))
 
     class Redis:
         async def ping(self):
             return True
 
-    monkeypatch.setattr(health_module, "get_redis", lambda: Redis())
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(health_module, "new_health_redis", lambda: Redis())
     monkeypatch.setattr(
         health_module.report,
         "snapshot",

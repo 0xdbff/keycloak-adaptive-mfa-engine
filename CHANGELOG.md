@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- `MSSQL_POOL_SIZE` and `MSSQL_MAX_OVERFLOW` size the SQL Server connection pool. `MSSQL_AUTHENTICATION=ActiveDirectoryMsi` signs in with an Azure managed identity.
+- `tests/integration` runs the login-scoring and monitoring queries against a real database, on PostgreSQL and SQL Server, in CI and before a release.
+- `DB_TYPE=mssql` runs the engine against Azure SQL (or any SQL Server) in the same codebase as PostgreSQL. Postgres remains the default. Connection still uses the existing `POSTGRES_*` variables; ODBC Driver 18 is in the image for the SQL Server path.
+
+### Removed
+
+- `POSTGRES_SCHEMA`. It was read and never used.
+
+### Fixed
+
+- Image lock file pins SQLAlchemy 2.0.54 so `mssql+aioodbc` loads (added in 2.0.23). CI installs from the same lock file and runs the unit suite against SQL Server.
+- Boolean and keyset filters no longer compile to `col = 1 = 1` on SQL Server, so login scoring, configuration activation, VPN filters, and monitoring paging work there.
+- Map buckets round once, at the configured precision, in a subquery, so SQL Server groups and places coordinates as PostgreSQL does. Rounding through 4 decimals first put 38.74996 in the 38.8 cell, and capped the precision at 4 decimals.
+- `/health` and `/health/detail` answer within `HEALTH_CHECK_TIMEOUT` (3 seconds by default) when the database or Redis hangs, on both databases, and recover by the next probe once it is back. They could previously hold a probe for 15 seconds or more. Checks use their own connections, so a stuck check cannot hold a slot in the shared pool.
+- Realm, group, and human-readable text columns are `NVARCHAR` with a case-sensitive UTF-8 collation on SQL Server. Hash columns use a binary collation.
+- `wait_for_db.py` brace-escapes the ODBC password so generated Azure passwords containing `;`, `{`, or `}` can start the container.
+- SQL Server connection pools default to 2 plus 2 overflow per worker, so the default four workers stay under Azure SQL Basic's limits of 30 concurrent workers and logins.
+- Monitoring queries no longer fail with a collation conflict on a SQL Server database that uses the server's default collation.
+- `auth_event` and `auth_process` cluster on time rather than a random UUID on SQL Server, so they do not fragment as they grow. The realm index on `auth_event` uses ascending keys for the same reason. The remaining secondary indexes need routine maintenance, described in `docs/environment-variables.md`.
+- `alembic check` reports no changes on a migrated database, on either dialect, and CI enforces it.
+- The release workflow runs the same tests as CI, from the same lock file the image uses.
+
 ## [1.1.0] - 2026-10-19
 
 ### Added
