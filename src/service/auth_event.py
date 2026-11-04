@@ -11,6 +11,7 @@ from src.data.factory import AuthEventFactory
 
 from time import time
 from datetime import timedelta
+from uuid import UUID
 
 import logging
 
@@ -66,8 +67,20 @@ class AuthEventService:
         logging.info(f"{self.request_payload}")
         logging.info(f"{self.request_payload.event_type}")
 
+        is_final_event = str(auth_event.event_type) in ("LOGIN", "LOGIN_ERROR")
+        own_process = None
+
         if user_id:
-            process_id = await self.__get_open_auth_process(user_id)
+            open_process_id = await self.__get_open_auth_process(user_id)
+            process_id = open_process_id
+
+            if is_final_event:
+                own_process_id, own_process = await self.__get_own_auth_process(user_id)
+                if own_process is not None:
+                    process_id = own_process_id
+                    if own_process_id == self.__canonical_id(open_process_id):
+                        # The decision still open: close it as usual.
+                        own_process = None
 
             if process_id is None:
                 # No risk decision opened a process for this user in the last
@@ -87,8 +100,9 @@ class AuthEventService:
 
         await AuthEventRepository.create_auth_event(auth_event)
 
-        is_final_event = str(auth_event.event_type) in ("LOGIN", "LOGIN_ERROR")
-        if process_id is not None and is_final_event:
+        if own_process is not None:
+            await self.__finalize_own_process(own_process, event_type)
+        elif process_id is not None and is_final_event:
             await self.__finalize_process(user_id, process_id, event_type)
 
     async def __update_redis_cache(self, event_type: str, user_id: str):
@@ -122,6 +136,54 @@ class AuthEventService:
         return await self.redis.get(
             f"auth_process:{tenant_scoped_id(self._realm, user_id)}"
         )
+
+    async def __get_own_auth_process(
+        self, user_id: str
+    ) -> tuple[str | None, AuthProcess | None]:
+        """The decision this outcome names by its id, if any.
+
+        The Keycloak plugin sends a login's outcome under the id of the
+        decision that scored it, while the events before it (a wrong code
+        entered first, for example) keep their own ids. The id wins over the
+        open pointer: a wrong code closes the open process as LOGIN_ERROR, so
+        the outcome of the right code finds nothing open; a slow login can
+        outlive the 5 minute pointer; and when the same user logs in twice at
+        once, the pointer names only the newest decision. Returns (process id,
+        process), or (None, None).
+        """
+        process_id = self.__canonical_id(self.request_payload.id)
+        if process_id is None:
+            return None, None
+
+        auth_process = await AuthProcessRepository.get_auth_process_by_id(
+            process_id, realm_id=self._realm
+        )
+        if auth_process is None or str(auth_process.user_id) != str(user_id):
+            return None, None
+        return process_id, auth_process
+
+    @staticmethod
+    def __canonical_id(value) -> str | None:
+        """A decision id in one spelling (the pointer holds it as the client
+        sent it), or None if it is not a UUID."""
+        if value is None:
+            return None
+        try:
+            return str(UUID(str(value)))
+        except ValueError:
+            return None
+
+    async def __finalize_own_process(self, auth_process: AuthProcess, final_status: str):
+        """Close a decision found by the outcome's id. A successful login wins
+        over an earlier error, never the other way round. The open pointer is
+        left alone: it does not name this decision, so it belongs to another
+        login."""
+        if auth_process.final_status == "LOGIN" and final_status != "LOGIN":
+            return
+
+        auth_process.final_status = final_status
+        _ = await AuthProcessRepository.update_auth_process(auth_process)
+        logging.info(f"Auth process has been updated by its outcome! id: {auth_process.id}")
 
     async def __finalize_process(
         self, user_id: str, process_id: str, final_status: str
