@@ -11,7 +11,9 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 import pytest
-from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects import mssql, postgresql
+
+from src.data.repository import monitoring_expr as expr
 
 from src.data.repository.monitoring import (
     RISKY_THRESHOLD,
@@ -27,6 +29,14 @@ def sql(stmt) -> str:
     return str(
         stmt.compile(
             dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
+
+
+def sql_mssql(stmt) -> str:
+    return str(
+        stmt.compile(
+            dialect=mssql.dialect(), compile_kwargs={"literal_binds": True}
         )
     )
 
@@ -73,7 +83,9 @@ def test_cursor_uses_row_value_comparison():
     """The keyset predicate must compare the pair, not just the timestamp."""
     cursor = encode_cursor(datetime(2026, 8, 19, 4, 12, tzinfo=timezone.utc), "44444444-4444-4444-8444-444444444401")
     s = sql(MonitoringRepository.build_events_query("acme", cursor=cursor))
-    assert "(auth_event.event_time, auth_event.id) >" in s
+    assert "auth_event.event_time >" in s
+    assert "OR" in s
+    assert "auth_event.id >" in s
 
 
 def test_cursor_direction_follows_sort_order():
@@ -82,8 +94,27 @@ def test_cursor_direction_follows_sort_order():
     desc = sql(
         MonitoringRepository.build_events_query("acme", cursor=cursor, ascending=False)
     )
-    assert "(auth_event.event_time, auth_event.id) >" in asc
-    assert "(auth_event.event_time, auth_event.id) <" in desc
+    assert "auth_event.event_time >" in asc
+    assert "auth_event.event_time <" in desc
+
+
+def test_mssql_cursor_expands_row_comparison():
+    cursor = encode_cursor(datetime(2026, 8, 19, tzinfo=timezone.utc), "44444444-4444-4444-8444-444444444401")
+    s = sql_mssql(MonitoringRepository.build_events_query("acme", cursor=cursor))
+    assert "auth_event.event_time >" in s
+    assert "OR" in s
+    assert "(auth_event.event_time, auth_event.id)" not in s
+    assert "= 1 = 1" not in s
+
+
+def test_mssql_json_reads_use_json_value():
+    s = sql_mssql(MonitoringRepository.build_events_query("acme", is_vpn=True))
+    assert "JSON_VALUE" in s
+    assert "$.client" in s
+    assert "$.is_vpn" in s
+    assert "->>" not in s
+    assert "= 1" in s
+    assert "= 1 = 1" not in s
 
 
 def test_cursor_round_trips():
@@ -171,7 +202,7 @@ def test_is_vpn_filter_reads_through_the_fallback():
 def test_is_vpn_false_is_not_treated_as_absent():
     """is_vpn=False must filter, not fall through as "unset"."""
     s = sql(MonitoringRepository.build_events_query("acme", is_vpn=False))
-    assert "IS false" in s
+    assert "= false" in s
 
 
 def test_projection_covers_every_response_field():
@@ -296,12 +327,36 @@ def test_stats_with_realm_is_scoped():
 
 def test_geo_groups_by_the_rounded_cell_not_the_raw_coordinate():
     """Grouping by the raw coordinate yields one bucket per distinct location,
-    which defeats bucketing entirely.
+    which defeats bucketing entirely. Rounding lives in a subquery so SQL
+    Server sees one expression, not two bind copies of it.
     """
     s = sql(MonitoringRepository.build_geo_query("acme"))
+    assert "NUMERIC(9, 1)" in s
     group_by = s.split("GROUP BY")[1]
-    assert "round" in group_by
-    assert "NUMERIC" in group_by
+    assert "lat" in group_by
+    assert "long" in group_by
+    assert "NUMERIC" not in group_by
+
+
+def test_mssql_geo_groups_by_subquery_columns():
+    s = sql_mssql(MonitoringRepository.build_geo_query("acme"))
+    assert "NUMERIC(9, 1)" in s
+    group_by = s.split("GROUP BY")[1]
+    assert "NUMERIC" not in group_by
+    assert "= 1 = 1" not in s
+
+
+def test_geo_scale_follows_the_configured_precision(monkeypatch):
+    """The precision used to be capped by a fixed intermediate scale of 4."""
+    monkeypatch.setattr(expr, "GEO_PRECISION", 6)
+    assert "NUMERIC(14, 6)" in sql(MonitoringRepository.build_geo_query("acme"))
+    assert "NUMERIC(14, 6)" in sql_mssql(MonitoringRepository.build_geo_query("acme"))
+
+
+def test_geo_precision_is_not_a_bind_parameter():
+    """Binds in the rounding are what made SQL Server reject the GROUP BY."""
+    cell = expr.geo_cell(expr.AuthContext.lat).compile(dialect=mssql.dialect())
+    assert not cell.params
 
 
 def test_geo_excludes_the_zero_zero_sentinel():

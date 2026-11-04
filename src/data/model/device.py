@@ -11,6 +11,7 @@ from sqlalchemy.orm import validates
 
 from .base import Base
 
+from src.core.sql_dialect import hashed_str, text_str
 from src.utils.validation.regex import SHA256_REGEX_HEX
 
 
@@ -42,27 +43,27 @@ class Device(Base):
     __tablename__ = "device"
 
     hash = Column(
-        String(64),
+        hashed_str(64),
         primary_key=True,
         doc="Primary key to uniquely identify the device record.",
     )
     client = Column(
-        String(128),
+        text_str(128),
         doc="Optional descriptive information about the device.",
     )
     device = Column(
-        String(64),
+        text_str(64),
         nullable=False,
         doc="Name or identifier of the client application on the device.",
     )
     system_language = Column(
-        String(64), nullable=False, doc="System language setting on the device."
+        text_str(64), nullable=False, doc="System language setting on the device."
     )
     screen_resolution = Column(
         String(64), nullable=False, doc="Screen resolution setting on the device."
     )
-    operating_system = Column(String(64), doc="Operating system name on the device.")
-    browser = Column(String(64), doc="Browser name or version on the device.")
+    operating_system = Column(text_str(64), doc="Operating system name on the device.")
+    browser = Column(text_str(64), doc="Browser name or version on the device.")
 
     created_at = Column(
         DateTime(timezone=True),

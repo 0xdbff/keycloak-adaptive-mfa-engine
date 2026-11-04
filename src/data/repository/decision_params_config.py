@@ -8,6 +8,7 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.core.database import DB
+from src.core.sql_dialect import bool_is
 from src.data.model import DecisionParamsConfig
 
 
@@ -159,7 +160,7 @@ class DecisionParamsConfigRepository:
                 .where(
                     DecisionParamsConfig.realm_id == realm_id,
                     DecisionParamsConfig.group_id == group_id,
-                    DecisionParamsConfig.is_active.is_(True),
+                    bool_is(DecisionParamsConfig.is_active, True),
                 )
                 .limit(1)
             )
@@ -185,7 +186,7 @@ class DecisionParamsConfigRepository:
         async with async_session() as session:
             stmt = select(DecisionParamsConfig).where(
                 DecisionParamsConfig.realm_id == realm_id,
-                DecisionParamsConfig.is_active.is_(True),
+                bool_is(DecisionParamsConfig.is_active, True),
             )
             result = await session.execute(stmt)
             return result.scalars().all()
@@ -252,7 +253,7 @@ class DecisionParamsConfigRepository:
             current_active_stmt = select(DecisionParamsConfig).where(
                 DecisionParamsConfig.realm_id == realm_id,
                 DecisionParamsConfig.group_id == group_id,
-                DecisionParamsConfig.is_active.is_(True),
+                bool_is(DecisionParamsConfig.is_active, True),
             )
             current_active = (
                 await session.execute(current_active_stmt)
@@ -327,7 +328,7 @@ class DecisionParamsConfigRepository:
                 .where(
                     DecisionParamsConfig.realm_id == realm_id,
                     DecisionParamsConfig.group_id == group_id,
-                    DecisionParamsConfig.is_active.is_(True),
+                    bool_is(DecisionParamsConfig.is_active, True),
                 )
                 .limit(1)
             )

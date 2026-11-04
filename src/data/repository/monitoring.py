@@ -9,10 +9,11 @@ from datetime import datetime
 from typing import List, Optional, Tuple
 from uuid import UUID
 
-from sqlalchemy import case, func, select, tuple_
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.core.database import DB
+from src.core.sql_dialect import bool_is, row_compare
 from src.data.model import AuthContext, AuthEvent, AuthProcess
 from src.data.repository import monitoring_expr as expr
 
@@ -130,7 +131,7 @@ def _apply_filters(
     if risk_decision is not None:
         stmt = stmt.where(AuthProcess.pre_auth_risk_decision == risk_decision)
     if is_vpn is not None:
-        stmt = stmt.where(expr.is_vpn_expr.is_(True) if is_vpn else expr.is_vpn_expr.is_(False))
+        stmt = stmt.where(bool_is(expr.is_vpn_expr, is_vpn))
     return stmt
 
 
@@ -165,10 +166,15 @@ class MonitoringRepository:
 
         if cursor:
             cur_time, cur_id = decode_cursor(cursor)
-            key = tuple_(AuthEvent.event_time, AuthEvent.id)
-            bound = tuple_(cur_time, cur_id)
-            # The tuple form is index-satisfiable; the OR equivalent is not.
-            stmt = stmt.where(key > bound if ascending else key < bound)
+            stmt = stmt.where(
+                row_compare(
+                    AuthEvent.event_time,
+                    AuthEvent.id,
+                    cur_time,
+                    cur_id,
+                    greater=ascending,
+                )
+            )
 
         order = (
             (AuthEvent.event_time.asc(), AuthEvent.id.asc())
@@ -231,7 +237,7 @@ class MonitoringRepository:
                     func.distinct(
                         case(
                             (
-                                expr.is_vpn_expr.is_(True),
+                                bool_is(expr.is_vpn_expr, True),
                                 func.nullif(expr.ip_expr, ""),
                             )
                         )
@@ -254,28 +260,38 @@ class MonitoringRepository:
     ):
         """Build the map-bucket aggregate.
 
-        GROUP BY repeats the rounding expression: grouping by the raw
-        coordinate gives one bucket per location.
+        Rounding happens in a subquery so SELECT and GROUP BY share one pair
+        of bind parameters. Repeating the expression makes SQL Server treat
+        each copy as a different parameter (error 8120). Grouping by the raw
+        coordinate would give one bucket per location.
         """
         lat_cell = expr.geo_cell(expr.lat_expr)
         long_cell = expr.geo_cell(expr.long_expr)
 
-        stmt = _joined(
+        inner = _joined(
             select(
                 expr.country_expr.label("country"),
                 lat_cell.label("lat"),
                 long_cell.label("long"),
-                func.count().label("count"),
-                func.count(expr.risky_count_case(RISKY_THRESHOLD)).label("risky_count"),
+                expr.risky_count_case(RISKY_THRESHOLD).label("risky_flag"),
             ).select_from(AuthEvent)
         )
+        inner = _apply_window(
+            inner.where(expr.realm_filter(realm_id)).where(expr.has_usable_geo()),
+            since,
+            until,
+        ).subquery()
 
-        stmt = _apply_window(
-            stmt.where(expr.realm_filter(realm_id)).where(expr.has_usable_geo()), since, until
-        )
-
-        return stmt.group_by(expr.country_expr, lat_cell, long_cell).order_by(
-            func.count().desc()
+        return (
+            select(
+                inner.c.country,
+                inner.c.lat,
+                inner.c.long,
+                func.count().label("count"),
+                func.count(inner.c.risky_flag).label("risky_count"),
+            )
+            .group_by(inner.c.country, inner.c.lat, inner.c.long)
+            .order_by(func.count().desc())
         )
 
     @staticmethod

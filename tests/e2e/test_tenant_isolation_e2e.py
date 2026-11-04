@@ -115,7 +115,35 @@ def test_a_realm_cannot_read_or_poison_another_realms_history_for_a_guessed_user
         f"where user_id = '{victim_user}' and realm_id = '{c.REALM}';"
     )
     needed = int(env._engine_scoring_env()["MIN_AUTH_EVENTS"])
-    if needed > 1:
+    if needed > 1 and env.IS_MSSQL:
+        env.psql(f"""
+        with src as (
+            select top 1 * from auth_process
+            where user_id = '{victim_user}' and realm_id = '{c.REALM}'
+                and final_status = 'LOGIN'
+            order by started_at desc
+        ), days as (
+            select top ({needed - 1}) row_number() over (order by object_id) as n
+            from sys.objects
+        )
+        insert into auth_process (
+            id, user_id, auth_context_hash, device_info_hash, network_location_hash,
+            auth_context_json, pre_auth_risk_decision, parameters_config_id,
+            final_status, started_at, finished_at, risk_eval_vars,
+            net_loc_credibility, device_credibility, realm_id)
+        select newid(), user_id, auth_context_hash, device_info_hash,
+            network_location_hash,
+            json_modify(
+                auth_context_json, '$.event_time',
+                datediff_big(millisecond, '1970-01-01', dateadd(day, -n, sysutcdatetime()))
+            ),
+            pre_auth_risk_decision, parameters_config_id, final_status,
+            dateadd(day, -n, sysutcdatetime()),
+            dateadd(second, 4, dateadd(day, -n, sysutcdatetime())),
+            risk_eval_vars, net_loc_credibility, device_credibility, realm_id
+        from src, days;
+        """)
+    elif needed > 1:
         env.psql(f"""
         with src as (
             select * from auth_process

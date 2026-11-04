@@ -29,7 +29,24 @@ target_metadata = Base.metadata
 # my_important_option = config.get_main_option("my_important_option")
 # ... etc.
 
-config.set_main_option("sqlalchemy.url", DATABASE_URL)
+# ConfigParser treats % as interpolation. Passwords (Azure SQL especially)
+# can contain it, so double them for the ini layer only.
+config.set_main_option("sqlalchemy.url", DATABASE_URL.replace("%", "%%"))
+
+# Indexes autogenerate cannot compare, or that exist on one dialect only: an
+# expression key on Postgres, DESC keys and clustered keys on SQL Server. Left
+# in, it proposes dropping or rebuilding them on every run. Change these by hand.
+HAND_MANAGED_INDEXES = {
+    "ix_auth_event_realm_id_event_time_id",
+    "ix_auth_user_event_time_desc",
+    "ix_auth_process_realm_user_final_finished",
+    "cx_auth_event_event_time_id",
+    "cx_auth_process_started_at_id",
+}
+
+
+def include_object(obj, name, type_, reflected, compare_to):
+    return not (type_ == "index" and name in HAND_MANAGED_INDEXES)
 
 
 def run_migrations_offline() -> None:
@@ -48,6 +65,7 @@ def run_migrations_offline() -> None:
     context.configure(
         url=url,
         target_metadata=target_metadata,
+        include_object=include_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -70,7 +88,11 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=include_object,
+        )
 
         with context.begin_transaction():
             context.run_migrations()

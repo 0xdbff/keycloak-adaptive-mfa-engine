@@ -45,6 +45,19 @@ def get_redis():
     return RedisService.get_singleton()
 
 
+def new_health_redis():
+    """A client for one /health ping, to be closed afterwards.
+
+    Not the shared client: its pool can hold connections on dead sockets, and a
+    check that picks one up fails or stalls even though Redis is back.
+    """
+    return redis.Redis(
+        **connection_kwargs(),
+        socket_timeout=environment.HEALTH_CHECK_TIMEOUT,
+        socket_connect_timeout=environment.HEALTH_CHECK_TIMEOUT,
+    )
+
+
 async def check_redis() -> None:
     """Fail startup with an error that says what is wrong with Redis.
 

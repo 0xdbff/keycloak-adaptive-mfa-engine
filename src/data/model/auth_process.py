@@ -19,6 +19,8 @@ prioritizes queries that filter on `user_id` and `final_status` while also
 sorting by the latest finish time first.
 """
 
+import uuid
+
 from sqlalchemy import (
     Column,
     String,
@@ -27,13 +29,14 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     JSON,
-    text,
     Index,
+    Uuid,
     desc,
 )
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from sqlalchemy.orm import validates
+
+from src.core.sql_dialect import hashed_str, ident_str, uuid_server_default
 
 from .base import Base
 
@@ -79,18 +82,19 @@ class AuthProcess(Base):
     )
 
     id = Column(
-        UUID(as_uuid=True),
+        Uuid(as_uuid=True),
         primary_key=True,
-        server_default=text("uuid_generate_v4()"),
+        default=uuid.uuid4,
+        server_default=uuid_server_default(),
         doc="Primary key: auto-generated UUID (v4).",
     )
     user_id = Column(
-        UUID(as_uuid=True),
+        Uuid(as_uuid=True),
         nullable=False,
         doc="References the user initiating this auth process.",
     )
     realm_id = Column(
-        String(255),
+        ident_str(255),
         nullable=True,
         doc=(
             "The Keycloak realm (tenant) this record belongs to, taken from the "
@@ -100,19 +104,19 @@ class AuthProcess(Base):
         ),
     )
     auth_context_hash = Column(
-        String(64),
+        hashed_str(64),
         nullable=False,
         doc="Auth_context hash.",
     )
     device_info_hash = Column(
-        String(64),
+        hashed_str(64),
         ForeignKey("device.hash"),
         nullable=False,
         doc="References the device.hash.",
     )
     device_credibility = Column(Float, nullable=True, default=0.0)
     network_location_hash = Column(
-        String(64),
+        hashed_str(64),
         ForeignKey("location_network.hash"),
         nullable=False,
         doc="References the location_network.hash.",
@@ -132,7 +136,7 @@ class AuthProcess(Base):
         Integer, nullable=False, doc="Numerical indicator for pre-auth risk analysis."
     )
     parameters_config_id = Column(
-        UUID(as_uuid=True),
+        Uuid(as_uuid=True),
         ForeignKey("decision_params_config.id"),
         nullable=False,
         doc="References the associated parameters config.",
@@ -158,6 +162,9 @@ class AuthProcess(Base):
 
     @validates("id", "user_id")
     def validate_uuid(self, key, value):
-        if UUID(value) is None:
-            raise ValueError(f"Invalid UUID v4 {value}.")
-        return value
+        if isinstance(value, uuid.UUID):
+            return value
+        try:
+            return uuid.UUID(str(value))
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise ValueError(f"Invalid UUID v4 {value}.") from exc

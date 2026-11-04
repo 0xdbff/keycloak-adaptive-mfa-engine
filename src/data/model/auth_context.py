@@ -11,6 +11,7 @@ from sqlalchemy.orm import validates
 
 from .base import Base
 
+from src.core.sql_dialect import hashed_str, text_str
 from src.utils.validation.regex import SHA256_REGEX_HEX
 
 
@@ -54,33 +55,33 @@ class AuthContext(Base):
     __tablename__ = "auth_context"
 
     hash = Column(
-        String(64),
+        hashed_str(64),
         primary_key=True,
         doc="Primary key to uniquely identify the auth context record.",
     )
 
-    device = Column(String(128), doc="Device information.")
+    device = Column(text_str(128), doc="Device information.")
     client = Column(
-        String(128), nullable=False, doc="The client application name or identifier."
+        text_str(128), nullable=False, doc="The client application name or identifier."
     )
     ip_address = Column(
         String(45), nullable=False, doc="IP address from which the request originated."
     )
     system_language = Column(
-        String(64), nullable=False, doc="Language setting on the system."
+        text_str(64), nullable=False, doc="Language setting on the system."
     )
     screen_resolution = Column(
         String(64),
         nullable=False,
         doc="Resolution setting of the client device's screen.",
     )
-    operating_system = Column(String(64), doc="Operating system information.")
-    browser = Column(String(64), doc="Browser information.")
+    operating_system = Column(text_str(64), doc="Operating system information.")
+    browser = Column(text_str(64), doc="Browser information.")
     lat = Column(Float, doc="Latitude component of the user's location.")
     long = Column(Float, doc="Longitude component of the user's location.")
     is_vpn = Column(Boolean, doc="Indicates if the user is behind a VPN.")
     country_name = Column(
-        String(32), doc="Detected or reported country name of the user."
+        text_str(32), doc="Detected or reported country name of the user."
     )
 
     created_at = Column(

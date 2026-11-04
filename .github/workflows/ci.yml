@@ -4,6 +4,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main, development]
+  # Release runs this same workflow, so a tag cannot be tested differently from a PR.
+  workflow_call:
 
 jobs:
   build-and-test:
@@ -35,7 +37,6 @@ jobs:
       POSTGRES_USER: amfa
       POSTGRES_PASSWORD: amfa
       POSTGRES_DB: amfa
-      POSTGRES_SCHEMA: public
       REDIS_HOST: localhost
       REDIS_PORT: "6379"
       REDIS_DB: "0"
@@ -46,8 +47,94 @@ jobs:
           python-version: "3.11"
           cache: pip
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.lock
       - name: Database migrations
         run: python -m alembic upgrade head
+      - name: Migrations match the models
+        run: python -m alembic check
       - name: Unit tests
         run: python -m pytest tests/unit -m "not slow"
+      - name: Integration tests
+        run: python -m pytest tests/integration
+
+  build-and-test-mssql:
+    runs-on: ubuntu-latest
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: Amfa_Test_Pass1
+        ports: ["1433:1433"]
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P Amfa_Test_Pass1 -C -Q 'SELECT 1' -b -o /dev/null"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 20s
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DB_TYPE: mssql
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "1433"
+      POSTGRES_USER: sa
+      POSTGRES_PASSWORD: Amfa_Test_Pass1
+      POSTGRES_DB: amfa
+      MSSQL_ENCRYPT: "true"
+      MSSQL_TRUST_SERVER_CERTIFICATE: "true"
+      REDIS_HOST: localhost
+      REDIS_PORT: "6379"
+      REDIS_DB: "0"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install Microsoft ODBC Driver 18
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+            | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+          curl -fsSL "https://packages.microsoft.com/config/ubuntu/${VERSION_ID}/prod.list" \
+            | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev mssql-tools18
+      - name: Create SQL Server database
+        run: |
+          set -euo pipefail
+          export PATH="$PATH:/opt/mssql-tools18/bin"
+          for _ in $(seq 1 30); do
+            sqlcmd -S localhost,1433 -U sa -P 'Amfa_Test_Pass1' -C -Q "SELECT 1" && break
+            sleep 2
+          done
+          sqlcmd -S localhost,1433 -U sa -P 'Amfa_Test_Pass1' -C -Q \
+            "CREATE DATABASE amfa COLLATE Latin1_General_100_CS_AS_SC_UTF8; CREATE DATABASE amfa_default_collation"
+      - name: Install dependencies
+        run: pip install -r requirements.lock
+      - name: aioodbc dialect is importable
+        run: python -c "from sqlalchemy.dialects.mssql import aioodbc; assert aioodbc.dialect.driver == 'aioodbc'"
+      - name: Database migrations
+        run: python -m alembic upgrade head
+      - name: Migrations match the models
+        run: python -m alembic check
+      - name: Unit tests
+        run: python -m pytest tests/unit -m "not slow"
+      - name: Integration tests
+        run: python -m pytest tests/integration
+      # Azure SQL's default collation is case-insensitive. Tenant isolation must
+      # hold even when a database was not created with the recommended one.
+      - name: Integration tests on the server's default collation
+        env:
+          POSTGRES_DB: amfa_default_collation
+        run: |
+          python -m alembic upgrade head
+          python -m pytest tests/integration
