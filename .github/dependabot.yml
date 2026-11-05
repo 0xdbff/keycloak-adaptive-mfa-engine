@@ -1,19 +1,36 @@
 version: 2
+
+# Dependabot reads this file from the default branch. Promote through the
+# normal release process after review; merging to development alone is not active.
+# Security updates still use the default branch independently of this group.
+multi-ecosystem-groups:
+  dependencies:
+    schedule:
+      interval: "weekly"
+    target-branch: "development"
+    assignees: ["john-defpt"]
+
 updates:
   - package-ecosystem: "pip"
     directory: "/"
-    target-branch: "main"
-    schedule:
-      interval: "weekly"
+    patterns: ["*"]
+    multi-ecosystem-group: "dependencies"
+    ignore:
+      - dependency-name: "numpy"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "docker"
     directory: "/"
-    target-branch: "main"
-    schedule:
-      interval: "weekly"
+    patterns: ["*"]
+    multi-ecosystem-group: "dependencies"
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
   - package-ecosystem: "docker"
     directory: "/config/keycloak"
-    target-branch: "main"
-    schedule:
-      interval: "weekly"
+    patterns: ["*"]
+    multi-ecosystem-group: "dependencies"
+    ignore:
+      - dependency-name: "keycloak/keycloak"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
