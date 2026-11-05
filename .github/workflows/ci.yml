@@ -8,7 +8,8 @@ on:
   workflow_call:
 
 jobs:
-  build-and-test:
+  build-and-test-matrix:
+    name: build-and-test (${{ matrix.requirements }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -80,6 +81,15 @@ jobs:
         run: python -m pytest tests/unit -m "not slow"
       - name: Integration tests
         run: python -m pytest tests/integration
+
+  build-and-test:
+    # Without always(), a failed matrix skips this job, and a skipped required check counts as passing.
+    if: always()
+    needs: build-and-test-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every requirements job passed
+        run: test "${{ needs.build-and-test-matrix.result }}" = success
 
   build-and-test-mssql:
     runs-on: ubuntu-latest
