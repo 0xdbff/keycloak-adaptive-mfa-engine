@@ -15,13 +15,22 @@ updates:
     directory: "/"
     patterns: ["*"]
     multi-ecosystem-group: "dependencies"
+    ignore:
+      - dependency-name: "numpy"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "docker"
     directory: "/"
     patterns: ["*"]
     multi-ecosystem-group: "dependencies"
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "docker"
     directory: "/config/keycloak"
     patterns: ["*"]
     multi-ecosystem-group: "dependencies"
+    ignore:
+      - dependency-name: "keycloak/keycloak"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
