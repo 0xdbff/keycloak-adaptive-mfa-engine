@@ -64,7 +64,7 @@ def test_mssql_url_uses_odbc_and_encrypts():
 
 
 def test_sqlalchemy_registers_mssql_aioodbc():
-    """The image installs from requirements.lock. aioodbc landed in 2.0.23."""
+    """The image installs from requirements.txt. aioodbc landed in 2.0.23."""
     from sqlalchemy.dialects.mssql import aioodbc
 
     assert aioodbc.dialect.driver == "aioodbc"

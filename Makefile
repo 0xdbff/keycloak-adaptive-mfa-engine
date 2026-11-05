@@ -37,9 +37,9 @@ scan-sast: check-semgrep
 	fi
 
 scan-deps: check-trivy
-	@echo "→ trivy fs (dependencies, incl. requirements.lock)"
-	trivy fs --file-patterns "pip:requirements.lock" --scanners vuln --severity $(TRIVY_SEVERITY) --ignore-unfixed --exit-code 0 .
-	trivy fs --file-patterns "pip:requirements.lock" --scanners vuln --format json --output trivy-fs-report.json .
+	@echo "→ trivy fs (dependencies)"
+	trivy fs --scanners vuln --severity $(TRIVY_SEVERITY) --ignore-unfixed --exit-code 0 .
+	trivy fs --scanners vuln --format json --output trivy-fs-report.json .
 
 scan-dockerfile: check-hadolint
 	@echo "→ hadolint"
