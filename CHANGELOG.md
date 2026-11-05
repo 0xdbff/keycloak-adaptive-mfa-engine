@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tests/integration` runs the login-scoring and monitoring queries against a real database, on PostgreSQL and SQL Server, in CI and before a release.
 - `DB_TYPE=mssql` runs the engine against Azure SQL (or any SQL Server) in the same codebase as PostgreSQL. Postgres remains the default. Connection still uses the existing `POSTGRES_*` variables; ODBC Driver 18 is in the image for the SQL Server path.
 
+### Changed
+
+- The published image's lock file moves 60 packages: 54 upgraded and 6 added. The largest moves are FastAPI 0.109 to 0.162, Starlette 0 to 1 (0.35.1 to 1.10.0), Uvicorn 0.21 to 0.53, redis 5 to 8, and cryptography 44 to 50.
+- Startup and shutdown run through a FastAPI lifespan handler, because Starlette 1 removed `add_event_handler`.
+- CI installs `requirements.txt` and the image lock file in separate jobs, and fails when an installed version does not satisfy `requirements.txt`.
+
 ### Removed
 
 - `POSTGRES_SCHEMA`. It was read and never used.
