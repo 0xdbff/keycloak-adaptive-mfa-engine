@@ -48,7 +48,7 @@ run, and it is worth knowing before a confusing failure.
 | `test_inactive_days_e2e.py` | yes | inside the engine container |
 
 The two that import `src` need the engine's dependency set, and `pandas` is installed
-by the Dockerfile rather than declared in `requirements.txt`, so a host that installed
+by the Dockerfile rather than declared in `requirements.in`, so a host that installed
 only the declared requirements cannot import the engine at all. Run them where those
 dependencies live:
 
