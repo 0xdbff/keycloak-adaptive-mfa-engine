@@ -1,5 +1,6 @@
 import logging
 import sys
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
@@ -23,7 +24,16 @@ from src.core.exception_handler import register_exception_handlers
 import asyncio
 
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await __on_startup()
+    try:
+        yield
+    finally:
+        await __on_shutdown()
+
+
+app = FastAPI(lifespan=lifespan)
 
 # Configure logging before anything below can emit a log record (notably
 # register_exception_handlers' own "initialized" message), so it isn't
@@ -120,7 +130,3 @@ async def __on_startup():
 
 async def __on_shutdown():
     logging.info("Shutting down application.")
-
-
-app.add_event_handler("startup", __on_startup)
-app.add_event_handler("shutdown", __on_shutdown)
